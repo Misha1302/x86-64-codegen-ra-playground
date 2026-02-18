@@ -1,0 +1,12 @@
+[package]
+name = "analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+smallvec.workspace = true
+indexmap.workspace = true
+petgraph.workspace = true
+ir = { path = "../ir" }

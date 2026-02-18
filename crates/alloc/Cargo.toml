@@ -1,0 +1,15 @@
+[package]
+name = "alloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+indexmap.workspace = true
+analysis = { path = "../analysis" }
+ir = { path = "../ir" }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,22 @@
+[package]
+name = "codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+iced-x86.workspace = true
+analysis = { path = "../analysis" }
+alloc = { path = "../alloc" }
+ir = { path = "../ir" }
+
+[dev-dependencies]
+alloc_linear_scan = { path = "../alloc_linear_scan" }
+alloc = { path = "../alloc" }
+analysis = { path = "../analysis" }
+ir = { path = "../ir" }
+smallvec = "1"
