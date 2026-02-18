@@ -1,0 +1,12 @@
+[package]
+name = "alloc_sim_anneal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+indexmap.workspace = true
+analysis = { path = "../analysis" }
+alloc = { path = "../alloc" }
+ir = { path = "../ir" }

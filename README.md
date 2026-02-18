@@ -72,6 +72,7 @@ crates/
   analysis/             liveness, live intervals, interference graph, dominators (частично)
   alloc/                API аллокатора (плагин-интерфейс), общие типы Locations
   alloc_linear_scan/    референс: linear scan allocator (GP regs)
+  alloc_sim_anneal/     simulated annealing allocator (GP regs + spill penalty)
   codegen/              lowering + emitter на iced-x86, disasm, метрики codegen
   runner/               отдельный процесс: mmap+exec байткода, sandbox-ish, bench
   cli/                  CLI: generate/run/report, вызывает runner

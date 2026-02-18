@@ -16,6 +16,7 @@ ir = { path = "../ir" }
 analysis = { path = "../analysis" }
 alloc = { path = "../alloc" }
 alloc_linear_scan = { path = "../alloc_linear_scan" }
+alloc_sim_anneal = { path = "../alloc_sim_anneal" }
 codegen = { path = "../codegen" }
 
 [dev-dependencies]

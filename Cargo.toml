@@ -5,6 +5,7 @@ members = [
   "crates/analysis",
   "crates/alloc",
   "crates/alloc_linear_scan",
+  "crates/alloc_sim_anneal",
   "crates/codegen",
   "crates/runner",
   "crates/cli",
