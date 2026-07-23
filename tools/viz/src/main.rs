@@ -1,6 +1,6 @@
+use analysis::{build_interference_graph, compute_live_intervals};
 use anyhow::{Context, Result};
 use clap::Parser;
-use analysis::{build_interference_graph, compute_live_intervals};
 use ir::examples;
 use std::fs;
 
@@ -31,18 +31,18 @@ fn main() -> Result<()> {
         if let Some(iv) = li.intervals.iter().find(|i| i.v == *v) {
             label = format!("{:?} [{}..{}]", v, (iv.start.0), (iv.end.0));
         }
-	dot.push_str(&format!("  \"{:?}\" [label=\"{}\"];\\n", v, label));
+        dot.push_str(&format!("  \"{:?}\" [label=\"{}\"];\\n", v, label));
     }
 
     // undirected edges: print each once
     use std::collections::HashSet;
-    let mut seen: HashSet<(u32,u32)> = HashSet::new();
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
     for (a, ns) in ig.edges.iter() {
         for b in ns.iter() {
-            let (x,y) = (a.0, b.0);
-            let key = if x<y {(x,y)} else {(y,x)};
+            let (x, y) = (a.0, b.0);
+            let key = if x < y { (x, y) } else { (y, x) };
             if seen.insert(key) {
-		dot.push_str(&format!("  \"{:?}\" -- \"{:?}\";\\n", a, b));
+                dot.push_str(&format!("  \"{:?}\" -- \"{:?}\";\\n", a, b));
             }
         }
     }

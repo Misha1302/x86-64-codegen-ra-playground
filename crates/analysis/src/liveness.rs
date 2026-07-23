@@ -1,6 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indexmap::{IndexMap, IndexSet};
-use ir::{successors, term_uses, uses, defs, BlockId, Function, VReg};
+use ir::{defs, successors, term_uses, uses, BlockId, Function, Inst, VReg};
+
+pub type PhiDefinitions = IndexMap<BlockId, IndexSet<VReg>>;
+pub type PhiEdgeUses = IndexMap<(BlockId, BlockId), IndexSet<VReg>>;
 
 #[derive(Debug, Clone)]
 pub struct BlockLiveness {
@@ -13,69 +16,145 @@ pub struct BlockLiveness {
 #[derive(Debug, Clone)]
 pub struct Liveness {
     pub per_block: IndexMap<BlockId, BlockLiveness>,
+    pub phi_defs: PhiDefinitions,
+    pub phi_uses: PhiEdgeUses,
+}
+
+pub fn build_predecessors(f: &Function) -> Result<IndexMap<BlockId, IndexSet<BlockId>>> {
+    let block_ids: IndexSet<BlockId> = f.blocks.iter().map(|block| block.id).collect();
+    let mut predecessors: IndexMap<BlockId, IndexSet<BlockId>> = f
+        .blocks
+        .iter()
+        .map(|block| (block.id, IndexSet::new()))
+        .collect();
+
+    for block in &f.blocks {
+        for successor in successors(&block.term) {
+            if !block_ids.contains(&successor) {
+                anyhow::bail!("block {:?} has unknown successor {:?}", block.id, successor);
+            }
+            predecessors
+                .get_mut(&successor)
+                .context("successor predecessor set")?
+                .insert(block.id);
+        }
+    }
+
+    Ok(predecessors)
+}
+
+fn collect_phi_data(f: &Function) -> (PhiDefinitions, PhiEdgeUses) {
+    let mut phi_defs = PhiDefinitions::new();
+    let mut phi_uses = PhiEdgeUses::new();
+
+    for block in &f.blocks {
+        for inst in &block.insts {
+            if let Inst::PhiI64 { dst, incoming } = inst {
+                phi_defs.entry(block.id).or_default().insert(*dst);
+                for (pred, value) in incoming {
+                    phi_uses
+                        .entry((*pred, block.id))
+                        .or_default()
+                        .insert(*value);
+                }
+            }
+        }
+    }
+
+    (phi_defs, phi_uses)
 }
 
 pub fn compute_liveness(f: &Function) -> Result<Liveness> {
+    let (phi_defs, phi_uses) = collect_phi_data(f);
     let mut per_block: IndexMap<BlockId, BlockLiveness> = IndexMap::new();
 
-    for b in f.blocks_in_order() {
+    for block in f.blocks_in_order() {
         let mut use_set = IndexSet::new();
         let mut def_set = IndexSet::new();
 
-        // Phi uses are conceptually on incoming edges; for MVP we treat them as normal uses here,
-        // which is conservative enough for examples.
-        for inst in &b.insts {
-            for u in uses(inst) {
-                if !def_set.contains(&u) {
-                    use_set.insert(u);
+        for inst in &block.insts {
+            match inst {
+                Inst::PhiI64 { dst, .. } => {
+                    def_set.insert(*dst);
+                }
+                _ => {
+                    for used in uses(inst) {
+                        if !def_set.contains(&used) {
+                            use_set.insert(used);
+                        }
+                    }
+                    if let Some(defined) = defs(inst) {
+                        def_set.insert(defined);
+                    }
                 }
             }
-            if let Some(d) = defs(inst) {
-                def_set.insert(d);
-            }
         }
-        for u in term_uses(&b.term) {
-            if !def_set.contains(&u) {
-                use_set.insert(u);
+
+        for used in term_uses(&block.term) {
+            if !def_set.contains(&used) {
+                use_set.insert(used);
             }
         }
 
-        per_block.insert(b.id, BlockLiveness {
-            live_in: IndexSet::new(),
-            live_out: IndexSet::new(),
-            use_set,
-            def_set,
-        });
+        per_block.insert(
+            block.id,
+            BlockLiveness {
+                live_in: IndexSet::new(),
+                live_out: IndexSet::new(),
+                use_set,
+                def_set,
+            },
+        );
     }
 
-    // Iterative dataflow
     let mut changed = true;
     while changed {
         changed = false;
-        for b in f.blocks.iter().rev() {
-            let succs = successors(&b.term);
+
+        for block in f.blocks.iter().rev() {
             let mut live_out = IndexSet::new();
-            for s in succs {
-                if let Some(slv) = per_block.get(&s) {
-                    for v in slv.live_in.iter() { live_out.insert(*v); }
+
+            for successor in successors(&block.term) {
+                let successor_liveness = per_block
+                    .get(&successor)
+                    .with_context(|| format!("missing liveness for successor {:?}", successor))?;
+                let successor_phi_defs = phi_defs.get(&successor);
+
+                for value in &successor_liveness.live_in {
+                    if successor_phi_defs.is_none_or(|defs| !defs.contains(value)) {
+                        live_out.insert(*value);
+                    }
+                }
+
+                if let Some(edge_uses) = phi_uses.get(&(block.id, successor)) {
+                    live_out.extend(edge_uses.iter().copied());
                 }
             }
 
-            let mut live_in = per_block[&b.id].use_set.clone();
-            for v in live_out.iter() {
-                if !per_block[&b.id].def_set.contains(v) {
-                    live_in.insert(*v);
+            let current = per_block
+                .get(&block.id)
+                .with_context(|| format!("missing liveness for block {:?}", block.id))?;
+            let mut live_in = current.use_set.clone();
+            for value in &live_out {
+                if !current.def_set.contains(value) {
+                    live_in.insert(*value);
                 }
             }
 
-            let bl = per_block.get_mut(&b.id).unwrap();
-            if bl.live_in != live_in || bl.live_out != live_out {
-                bl.live_in = live_in;
-                bl.live_out = live_out;
+            let current = per_block
+                .get_mut(&block.id)
+                .with_context(|| format!("missing mutable liveness for block {:?}", block.id))?;
+            if current.live_in != live_in || current.live_out != live_out {
+                current.live_in = live_in;
+                current.live_out = live_out;
                 changed = true;
             }
         }
     }
 
-    Ok(Liveness { per_block })
+    Ok(Liveness {
+        per_block,
+        phi_defs,
+        phi_uses,
+    })
 }

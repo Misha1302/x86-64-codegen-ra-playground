@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Instant;
 
+const MAX_CODE_SIZE: usize = 1024 * 1024;
+const MAX_CASES: usize = 4096;
+
 #[derive(Parser)]
 struct Args {
-    /// JSON file containing code bytes + kind + inputs
     #[arg(long)]
     spec: String,
 }
@@ -14,92 +16,160 @@ struct Args {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 enum Spec {
-    I64_3args { code: Vec<u8>, a: i64, b: i64, c: i64 },
-    I64_2args { code: Vec<u8>, a: i64, b: i64 },
+    I64Cases { code: Vec<u8>, args: Vec<Vec<i64>> },
     Sum8F32 { code: Vec<u8>, iters: u32 },
 }
 
-fn apply_limits_best_effort() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        // no_new_privs
-        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-        // rlimit: 1s CPU, 256MB AS
-        let cpu = libc::rlimit { rlim_cur: 1, rlim_max: 2 };
-        libc::setrlimit(libc::RLIMIT_CPU, &cpu);
-        let as_ = libc::rlimit { rlim_cur: 256 * 1024 * 1024, rlim_max: 512 * 1024 * 1024 };
-        libc::setrlimit(libc::RLIMIT_AS, &as_);
+#[cfg(target_os = "linux")]
+struct ExecutableMapping {
+    ptr: *mut u8,
+    size: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl ExecutableMapping {
+    fn new(code: &[u8]) -> Result<Self> {
+        anyhow::ensure!(!code.is_empty(), "generated code is empty");
+        anyhow::ensure!(code.len() <= MAX_CODE_SIZE, "generated code is too large");
+        unsafe {
+            let ptr = libc::mmap(
+                std::ptr::null_mut(),
+                code.len(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if ptr == libc::MAP_FAILED {
+                bail!("mmap failed: {}", std::io::Error::last_os_error());
+            }
+            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr.cast::<u8>(), code.len());
+            if libc::mprotect(ptr, code.len(), libc::PROT_READ | libc::PROT_EXEC) != 0 {
+                let error = std::io::Error::last_os_error();
+                libc::munmap(ptr, code.len());
+                bail!("mprotect failed: {error}");
+            }
+            Ok(Self {
+                ptr: ptr.cast::<u8>(),
+                size: code.len(),
+            })
+        }
+    }
+
+    fn ptr(&self) -> *mut u8 {
+        self.ptr
     }
 }
 
-fn mmap_exec(code: &[u8]) -> Result<*mut u8> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        bail!("runner MVP supports linux mmap exec");
+#[cfg(target_os = "linux")]
+impl Drop for ExecutableMapping {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.ptr.cast(), self.size);
+        }
     }
-    #[cfg(target_os = "linux")]
+}
+
+#[cfg(target_os = "linux")]
+fn apply_limits() -> Result<()> {
     unsafe {
-        let size = code.len();
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
-        if ptr == libc::MAP_FAILED {
-            bail!("mmap failed");
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            bail!(
+                "PR_SET_NO_NEW_PRIVS failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
-        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, size);
-        // RX
-        if libc::mprotect(ptr, size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-            bail!("mprotect failed");
+        let cpu = libc::rlimit {
+            rlim_cur: 2,
+            rlim_max: 3,
+        };
+        if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0 {
+            bail!("RLIMIT_CPU failed: {}", std::io::Error::last_os_error());
         }
-        Ok(ptr as *mut u8)
+        let address_space = libc::rlimit {
+            rlim_cur: 256 * 1024 * 1024,
+            rlim_max: 256 * 1024 * 1024,
+        };
+        if libc::setrlimit(libc::RLIMIT_AS, &address_space) != 0 {
+            bail!("RLIMIT_AS failed: {}", std::io::Error::last_os_error());
+        }
+        let files = libc::rlimit {
+            rlim_cur: 16,
+            rlim_max: 16,
+        };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &files) != 0 {
+            bail!("RLIMIT_NOFILE failed: {}", std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+fn execute_i64(ptr: *mut u8, args: &[i64]) -> Result<i64> {
+    unsafe {
+        Ok(match args {
+            [] => std::mem::transmute::<*mut u8, extern "C" fn() -> i64>(ptr)(),
+            [a] => std::mem::transmute::<*mut u8, extern "C" fn(i64) -> i64>(ptr)(*a),
+            [a, b] => std::mem::transmute::<*mut u8, extern "C" fn(i64, i64) -> i64>(ptr)(*a, *b),
+            [a, b, c] => {
+                std::mem::transmute::<*mut u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(*a, *b, *c)
+            }
+            [a, b, c, d] => {
+                std::mem::transmute::<*mut u8, extern "C" fn(i64, i64, i64, i64) -> i64>(ptr)(
+                    *a, *b, *c, *d,
+                )
+            }
+            [a, b, c, d, e] => std::mem::transmute::<
+                *mut u8,
+                extern "C" fn(i64, i64, i64, i64, i64) -> i64,
+            >(ptr)(*a, *b, *c, *d, *e),
+            [a, b, c, d, e, f] => std::mem::transmute::<
+                *mut u8,
+                extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64,
+            >(ptr)(*a, *b, *c, *d, *e, *f),
+            _ => bail!("runner supports at most 6 i64 arguments"),
+        })
     }
 }
 
 fn main() -> Result<()> {
-    apply_limits_best_effort();
+    #[cfg(not(target_os = "linux"))]
+    bail!("runner supports Linux x86-64 only");
 
-    let args = Args::parse();
-    let data = fs::read(&args.spec).context("read spec")?;
-    let spec: Spec = serde_json::from_slice(&data).context("parse spec json")?;
+    #[cfg(target_os = "linux")]
+    {
+        let args = Args::parse();
+        let data = fs::read(&args.spec).context("read spec")?;
+        let spec: Spec = serde_json::from_slice(&data).context("parse spec JSON")?;
+        apply_limits()?;
 
-    match spec {
-        Spec::I64_3args { code, a, b, c } => {
-            let ptr = mmap_exec(&code)?;
-            let f: extern "C" fn(i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
-            let r = f(a, b, c);
-            println!("RESULT {r}");
-        }
-        Spec::I64_2args { code, a, b } => {
-            let ptr = mmap_exec(&code)?;
-            let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
-            let r = f(a, b);
-            println!("RESULT {r}");
-        }
-        Spec::Sum8F32 { code, iters } => {
-            let ptr = mmap_exec(&code)?;
-            let f: extern "C" fn(*const f32) -> f32 = unsafe { std::mem::transmute(ptr) };
-            let mut arr = [0f32; 8];
-            for i in 0..8 { arr[i] = (i as f32) + 0.25; }
-            let start = Instant::now();
-            let mut sink = 0f32;
-            for _ in 0..iters {
-                sink += f(arr.as_ptr());
+        match spec {
+            Spec::I64Cases { code, args } => {
+                anyhow::ensure!(args.len() <= MAX_CASES, "too many validation cases");
+                let mapping = ExecutableMapping::new(&code)?;
+                let mut results = Vec::with_capacity(args.len());
+                for case in &args {
+                    results.push(execute_i64(mapping.ptr(), case)?);
+                }
+                println!("RESULTS {}", serde_json::to_string(&results)?);
             }
-            let dur = start.elapsed();
-            println!("SINK {sink}");
-            println!("DURATION_NS {}", dur.as_nanos());
+            Spec::Sum8F32 { code, iters } => {
+                let mapping = ExecutableMapping::new(&code)?;
+                let function: extern "C" fn(*const f32) -> f32 =
+                    unsafe { std::mem::transmute(mapping.ptr()) };
+                let mut values = [0_f32; 8];
+                for (index, value) in values.iter_mut().enumerate() {
+                    *value = index as f32 + 0.25;
+                }
+                let start = Instant::now();
+                let mut sink = 0_f32;
+                for _ in 0..iters {
+                    sink += function(values.as_ptr());
+                }
+                println!("SINK {sink}");
+                println!("DURATION_NS {}", start.elapsed().as_nanos());
+            }
         }
     }
 
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-mod libc {
-    pub use ::libc::*;
 }

@@ -1,57 +1,76 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indexmap::{IndexMap, IndexSet};
-use ir::{successors, BlockId, Function};
+use ir::{BlockId, Function};
 
-/// Simple dominator computation (MVP).
+use crate::build_predecessors;
+
 #[derive(Debug, Clone)]
 pub struct Dominators {
     pub dom: IndexMap<BlockId, IndexSet<BlockId>>,
 }
 
-pub fn compute_dominators(f: &Function) -> Result<Dominators> {
-    let blocks: Vec<BlockId> = f.blocks.iter().map(|b| b.id).collect();
-    let all: IndexSet<BlockId> = blocks.iter().copied().collect();
+impl Dominators {
+    pub fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+        self.dom
+            .get(&block)
+            .is_some_and(|set| set.contains(&dominator))
+    }
+}
 
-    let mut dom: IndexMap<BlockId, IndexSet<BlockId>> = IndexMap::new();
-    for &b in &blocks {
-        if b == f.entry {
-            let mut s = IndexSet::new();
-            s.insert(b);
-            dom.insert(b, s);
+pub fn compute_dominators(f: &Function) -> Result<Dominators> {
+    let blocks: Vec<BlockId> = f.blocks.iter().map(|block| block.id).collect();
+    let all: IndexSet<BlockId> = blocks.iter().copied().collect();
+    anyhow::ensure!(
+        all.contains(&f.entry),
+        "entry block {:?} is missing",
+        f.entry
+    );
+
+    let predecessors = build_predecessors(f)?;
+    let mut dom = IndexMap::new();
+
+    for block in &blocks {
+        if *block == f.entry {
+            dom.insert(*block, IndexSet::from_iter([*block]));
         } else {
-            dom.insert(b, all.clone());
+            dom.insert(*block, all.clone());
         }
     }
-
-    let preds = build_preds(f);
 
     let mut changed = true;
     while changed {
         changed = false;
-        for &b in &blocks {
-            if b == f.entry { continue; }
-            let mut new = all.clone();
-            for p in preds.get(&b).into_iter().flat_map(|s| s.iter()) {
-                let pd = dom.get(p).unwrap();
-                new = new.intersection(pd).copied().collect();
+        for block in &blocks {
+            if *block == f.entry {
+                continue;
             }
-            new.insert(b);
-            if new != dom[&b] {
-                dom.insert(b, new);
+
+            let preds = predecessors
+                .get(block)
+                .with_context(|| format!("missing predecessor set for {:?}", block))?;
+            let mut pred_iter = preds.iter();
+            let mut next = if let Some(first_pred) = pred_iter.next() {
+                dom.get(first_pred)
+                    .with_context(|| format!("missing dominators for {:?}", first_pred))?
+                    .clone()
+            } else {
+                IndexSet::new()
+            };
+
+            for predecessor in pred_iter {
+                let predecessor_dom = dom
+                    .get(predecessor)
+                    .with_context(|| format!("missing dominators for {:?}", predecessor))?;
+                next.retain(|candidate| predecessor_dom.contains(candidate));
+            }
+            next.insert(*block);
+
+            if dom.get(block) != Some(&next) {
+                dom.insert(*block, next);
                 changed = true;
             }
         }
     }
 
     Ok(Dominators { dom })
-}
-
-fn build_preds(f: &Function) -> IndexMap<BlockId, IndexSet<BlockId>> {
-    let mut preds: IndexMap<BlockId, IndexSet<BlockId>> = IndexMap::new();
-    for b in &f.blocks {
-        for s in successors(&b.term) {
-            preds.entry(s).or_default().insert(b.id);
-        }
-    }
-    preds
 }

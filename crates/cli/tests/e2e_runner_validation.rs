@@ -2,34 +2,47 @@ use anyhow::Result;
 use std::process::Command;
 
 fn run_cli(args: &[&str]) -> Result<String> {
-    let out = Command::new(env!("CARGO_BIN_EXE_cli"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cli"))
         .args(args)
         .output()?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    anyhow::ensure!(out.status.success(), "cli failed:\n{}\n{}", stdout, stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    anyhow::ensure!(output.status.success(), "cli failed:\n{stdout}\n{stderr}");
     Ok(stdout)
 }
 
 #[test]
-fn e2e_basicblock_multiple_regs() -> Result<()> {
-    // Just ensure it runs + validates for multiple reg counts
-    for regs in [2, 3, 4, 5, 6] {
-        let _ = run_cli(&[
-            "run",
-            "--example",
-            "basicblock",
-            "--regs",
-            &regs.to_string(),
-        ])?;
+fn differential_validation_covers_cfgs_allocators_and_pressure() -> Result<()> {
+    for example in ["basicblock", "trace", "loop-sum", "phi-swap-loop"] {
+        for allocator in ["linear-scan", "sim-anneal"] {
+            for regs in [0_usize, 1, 2, 5] {
+                let stdout = run_cli(&[
+                    "run",
+                    "--example",
+                    example,
+                    "--alloc",
+                    allocator,
+                    "--regs",
+                    &regs.to_string(),
+                ])?;
+                assert!(stdout.contains("differential cases passed"));
+            }
+        }
     }
     Ok(())
 }
 
 #[test]
-fn e2e_trace_multiple_regs() -> Result<()> {
-    for regs in [2, 3, 4, 5, 6] {
-        let _ = run_cli(&["run", "--example", "trace", "--regs", &regs.to_string()])?;
+fn rejects_unknown_examples_allocators_and_excess_registers() -> Result<()> {
+    for args in [
+        vec!["run", "--example", "missing"],
+        vec!["run", "--alloc", "missing"],
+        vec!["run", "--regs", "6"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cli"))
+            .args(args)
+            .output()?;
+        assert!(!output.status.success());
     }
     Ok(())
 }

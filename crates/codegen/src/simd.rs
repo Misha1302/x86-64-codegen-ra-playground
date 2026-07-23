@@ -19,7 +19,7 @@ pub fn emit_sum8_scalar() -> Result<Vec<u8>> {
     a.xorps(xmm0, xmm0)?;
     for i in 0..8 {
         // movss xmm1, [rdi + i*4]
-        a.movss(xmm1, dword_ptr(rdi + (i*4) as i32))?;
+        a.movss(xmm1, dword_ptr(rdi + i * 4))?;
         a.addss(xmm0, xmm1)?;
     }
     // epilogue

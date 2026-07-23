@@ -1,18 +1,42 @@
-use ir::{examples, interp::Interpreter};
+use anyhow::Result;
+use ir::{examples, interp::Interpreter, parser};
 
 #[test]
-fn interp_basicblock() {
-    let f = examples::basicblock().unwrap();
-    let it = Interpreter::default();
-    let r = it.eval_i64(&f, &[2, 3, 4]).unwrap();
-    // (2+3)*4 + 7 + (2*4) + (3*4) = 5*4+7+8+12=47
-    assert_eq!(r, 47);
+fn interpreter_matches_built_in_examples() -> Result<()> {
+    let interpreter = Interpreter;
+    assert_eq!(
+        interpreter.eval_i64(&examples::basicblock()?, &[2, 3, 4])?,
+        47
+    );
+    assert_eq!(interpreter.eval_i64(&examples::trace()?, &[10, 7])?, 10);
+    assert_eq!(interpreter.eval_i64(&examples::trace()?, &[3, 9])?, 9);
+    assert_eq!(interpreter.eval_i64(&examples::loop_sum()?, &[0])?, 0);
+    assert_eq!(interpreter.eval_i64(&examples::loop_sum()?, &[5])?, 15);
+    for iterations in 0..=8 {
+        let expected = if iterations % 2 == 0 { 11 } else { 29 };
+        assert_eq!(
+            interpreter.eval_i64(&examples::phi_swap_loop()?, &[11, 29, iterations])?,
+            expected
+        );
+    }
+    Ok(())
 }
 
 #[test]
-fn interp_trace() {
-    let f = examples::trace().unwrap();
-    let it = Interpreter::default();
-    assert_eq!(it.eval_i64(&f, &[10, 7]).unwrap(), 10);
-    assert_eq!(it.eval_i64(&f, &[3, 9]).unwrap(), 9);
+fn parser_rejects_implicit_or_multiple_terminators() {
+    assert!(parser::parse("func f args=0\nblock b0:\nv0 = const 1").is_err());
+    assert!(parser::parse("func f args=0\nblock b0:\nv0 = const 1\nret v0\nret v0").is_err());
+}
+
+#[test]
+fn interpreter_enforces_step_limit() -> Result<()> {
+    let function = parser::parse(
+        r#"
+        func forever args=0
+        block b0:
+          jmp b0
+        "#,
+    )?;
+    assert!(Interpreter.eval_i64_with_limit(&function, &[], 10).is_err());
+    Ok(())
 }

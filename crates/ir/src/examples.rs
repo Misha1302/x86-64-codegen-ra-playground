@@ -3,9 +3,7 @@ use crate::Function;
 use anyhow::Result;
 
 pub fn basicblock() -> Result<Function> {
-    // Many temps to stress reg pressure.
-    // f(a,b,c) = (a+b)*c + 7 + (a*c) + (b*c)
-    let txt = r#"
+    let text = r#"
     func basicblock args=3
     block b0:
       v0 = arg 0
@@ -21,12 +19,11 @@ pub fn basicblock() -> Result<Function> {
       v10 = add v8 v9
       ret v10
     "#;
-    parser::parse(txt)
+    parser::parse(text)
 }
 
 pub fn trace() -> Result<Function> {
-    // max(a,b)
-    let txt = r#"
+    let text = r#"
     func trace args=2
     block b0:
       v0 = arg 0
@@ -43,5 +40,53 @@ pub fn trace() -> Result<Function> {
       v5 = phi b1 v3, b2 v4
       ret v5
     "#;
-    parser::parse(txt)
+    parser::parse(text)
+}
+
+pub fn loop_sum() -> Result<Function> {
+    let text = r#"
+    func loop_sum args=1
+    block b0:
+      v0 = arg 0
+      v1 = const 0
+      v2 = const 1
+      jmp b1
+    block b1:
+      v3 = phi b0 v2, b2 v7
+      v4 = phi b0 v1, b2 v6
+      v5 = cmpgt v3 v0
+      br v5 b3 b2
+    block b2:
+      v6 = add v4 v3
+      v7 = add v3 v2
+      jmp b1
+    block b3:
+      ret v4
+    "#;
+    parser::parse(text)
+}
+
+pub fn phi_swap_loop() -> Result<Function> {
+    let text = r#"
+    func phi_swap_loop args=3
+    block b0:
+      v0 = arg 0
+      v1 = arg 1
+      v2 = arg 2
+      v3 = const 0
+      v4 = const -1
+      jmp b1
+    block b1:
+      v5 = phi b0 v0, b2 v6
+      v6 = phi b0 v1, b2 v5
+      v7 = phi b0 v2, b2 v9
+      v8 = cmpgt v7 v3
+      br v8 b2 b3
+    block b2:
+      v9 = add v7 v4
+      jmp b1
+    block b3:
+      ret v5
+    "#;
+    parser::parse(text)
 }

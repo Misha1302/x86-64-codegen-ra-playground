@@ -1,8 +1,8 @@
-use anyhow::Result;
+use alloc::Allocator;
 use alloc::PhysRegSet;
 use alloc_linear_scan::LinearScan;
-use alloc::Allocator;
 use analysis::compute_live_intervals;
+use anyhow::Result;
 use codegen::{disasm, emit_function_i64};
 use ir::examples;
 
@@ -24,8 +24,14 @@ fn frame_has_aligned_rsp_when_stack_used() -> Result<()> {
 
     // If stack used => we should see `sub rsp,` AND later `add rsp,` before ret
     if asg.stack_slots > 0 {
-        assert!(text.contains("sub rsp,"), "expected stack allocation in prologue");
-        assert!(text.contains("add rsp,"), "expected stack deallocation in epilogue");
+        assert!(
+            text.contains("sub rsp,"),
+            "expected stack allocation in prologue"
+        );
+        assert!(
+            text.contains("add rsp,"),
+            "expected stack deallocation in epilogue"
+        );
     }
 
     // Must end with ret

@@ -1,15 +1,31 @@
 name: CI
+
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  build-test:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --workspace --all-targets
-      - name: Test
-        run: cargo test --workspace
+        with:
+          components: rustfmt, clippy
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Debug tests
+        run: cargo test --workspace --all-targets
+      - name: Release tests
+        run: cargo test --workspace --all-targets --release
+      - name: Differential smoke matrix
+        run: |
+          cargo run -p cli -- run --example basicblock --alloc linear-scan --regs 0
+          cargo run -p cli -- run --example trace --alloc sim-anneal --regs 2
+          cargo run -p cli -- run --example loop-sum --alloc linear-scan --regs 1
+          cargo run -p cli -- run --example phi-swap-loop --alloc sim-anneal --regs 2

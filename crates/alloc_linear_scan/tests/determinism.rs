@@ -1,8 +1,8 @@
 use alloc::Allocator;
-use anyhow::Result;
 use alloc::PhysRegSet;
 use alloc_linear_scan::LinearScan;
 use analysis::compute_live_intervals;
+use anyhow::Result;
 use ir::examples;
 
 #[test]

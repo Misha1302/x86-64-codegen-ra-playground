@@ -10,8 +10,12 @@ pub fn disasm(bytes: &[u8], ip: u64) -> String {
         decoder.decode_out(&mut instr);
         let mut s = String::new();
         fmt.format(&instr, &mut s);
-        out.push_str(&format!("{:016X}  {}
-", instr.ip(), s));
+        out.push_str(&format!(
+            "{:016X}  {}
+",
+            instr.ip(),
+            s
+        ));
     }
     out
 }

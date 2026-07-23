@@ -10,3 +10,6 @@ smallvec.workspace = true
 indexmap.workspace = true
 petgraph.workspace = true
 ir = { path = "../ir" }
+
+[dev-dependencies]
+smallvec.workspace = true

@@ -3,169 +3,255 @@ use anyhow::{bail, Context, Result};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
-/// Tiny text format (MVP). Example:
-///
-/// func basic args=3
-/// block b0:
-///   v0 = arg 0
-///   v1 = arg 1
-///   v2 = add v0 v1
-///   ret v2
-///
-/// For multi-block:
-/// block b0:
-///   v0 = arg 0
-///   v1 = arg 1
-///   v2 = cmpgt v0 v1
-///   br v2 b1 b2
-/// block b1:
-///   v3 = mov v0
-///   jmp b3
-/// block b2:
-///   v4 = mov v1
-///   jmp b3
-/// block b3:
-///   v5 = phi b1 v3, b2 v4
-///   ret v5
+fn parse_vreg(text: &str) -> Result<VReg> {
+    let number = text
+        .strip_prefix('v')
+        .context("expected vN")?
+        .parse::<u32>()?;
+    Ok(VReg(number))
+}
+
+fn parse_block_id(text: &str) -> Result<BlockId> {
+    let number = text
+        .strip_prefix('b')
+        .context("expected bN")?
+        .parse::<u32>()?;
+    Ok(BlockId(number))
+}
+
+fn ensure_exhausted<'a>(parts: &mut impl Iterator<Item = &'a str>, context: &str) -> Result<()> {
+    if let Some(extra) = parts.next() {
+        bail!("unexpected token '{extra}' after {context}");
+    }
+    Ok(())
+}
+
 pub fn parse(text: &str) -> Result<Function> {
-    let mut lines = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
 
     let header = lines.next().context("missing func header")?;
-    let mut parts = header.split_whitespace();
-    let kw = parts.next().unwrap();
-    if kw != "func" { bail!("expected 'func'"); }
-    let name = parts.next().context("missing name")?.to_string();
-    let args_part = parts.next().context("missing args")?;
-    let args = args_part.strip_prefix("args=").context("args=...")?.parse::<u32>()?;
+    let mut header_parts = header.split_whitespace();
+    anyhow::ensure!(header_parts.next() == Some("func"), "expected 'func'");
+    let name = header_parts
+        .next()
+        .context("missing function name")?
+        .to_string();
+    let args_text = header_parts.next().context("missing args=N")?;
+    let args = args_text
+        .strip_prefix("args=")
+        .context("expected args=N")?
+        .parse::<u32>()?;
+    ensure_exhausted(&mut header_parts, "function header")?;
 
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut cur: Option<Block> = None;
+    let mut blocks = Vec::new();
+    let mut current: Option<Block> = None;
+    let mut current_terminated = false;
+    let mut label_to_id = HashMap::new();
+    let mut pending_terms: Vec<(usize, String)> = Vec::new();
+    let mut pending_phis: Vec<(usize, usize, String)> = Vec::new();
 
-    let mut label_to_id: HashMap<String, BlockId> = HashMap::new();
-    let mut pending_terms: Vec<(usize, String)> = Vec::new(); // block index, term text
-    let mut pending_phis: Vec<(usize, usize, String)> = Vec::new(); // block idx, inst idx, phi text
+    let finish_current =
+        |current: &mut Option<Block>, terminated: bool, blocks: &mut Vec<Block>| -> Result<()> {
+            if let Some(block) = current.take() {
+                anyhow::ensure!(
+                    terminated,
+                    "block {:?} has no explicit terminator",
+                    block.id
+                );
+                blocks.push(block);
+            }
+            Ok(())
+        };
 
-    fn parse_vreg(s: &str) -> Result<VReg> {
-        let n = s.strip_prefix('v').context("vN")?.parse::<u32>()?;
-        Ok(VReg(n))
-    }
-    fn parse_blockid(name: &str) -> Result<BlockId> {
-        let n = name.strip_prefix('b').context("bN")?.parse::<u32>()?;
-        Ok(BlockId(n))
-    }
-
-    while let Some(line) = lines.next() {
+    for line in lines {
         if line.starts_with("block ") {
-            if let Some(b) = cur.take() { blocks.push(b); }
-            let label = line.strip_prefix("block ").unwrap().trim().trim_end_matches(':').to_string();
-            let id = parse_blockid(&label)?;
-            label_to_id.insert(label, id);
-            cur = Some(Block { id, insts: vec![], term: Terminator::Jmp { target: id } });
+            finish_current(&mut current, current_terminated, &mut blocks)?;
+
+            let label = line
+                .strip_prefix("block ")
+                .context("block prefix")?
+                .trim()
+                .strip_suffix(':')
+                .context("block label must end with ':'")?
+                .to_string();
+            let id = parse_block_id(&label)?;
+            anyhow::ensure!(
+                label_to_id.insert(label, id).is_none(),
+                "duplicate block label {:?}",
+                id
+            );
+            current = Some(Block {
+                id,
+                insts: Vec::new(),
+                term: Terminator::Jmp { target: id },
+            });
+            current_terminated = false;
             continue;
         }
-        let b = cur.as_mut().context("instruction outside block")?;
+
+        let block = current.as_mut().context("instruction outside block")?;
 
         if line.starts_with("ret ") || line.starts_with("jmp ") || line.starts_with("br ") {
+            anyhow::ensure!(
+                !current_terminated,
+                "block {:?} has multiple terminators",
+                block.id
+            );
             pending_terms.push((blocks.len(), line.to_string()));
-            b.term = Terminator::Jmp { target: b.id }; // temp
+            current_terminated = true;
             continue;
         }
 
-        // vX = op ...
+        anyhow::ensure!(
+            !current_terminated,
+            "instruction appears after terminator in block {:?}",
+            block.id
+        );
+
         let (lhs, rhs) = line.split_once('=').context("expected '='")?;
         let dst = parse_vreg(lhs.trim())?;
         let rhs = rhs.trim();
-        let mut p = rhs.split_whitespace();
-        let op = p.next().context("missing op")?;
+        let mut parts = rhs.split_whitespace();
+        let op = parts.next().context("missing operation")?;
+
         match op {
             "const" => {
-                let imm = p.next().context("imm")?.parse::<i64>()?;
-                b.insts.push(Inst::ConstI64 { dst, imm });
+                let imm = parts.next().context("missing constant")?.parse::<i64>()?;
+                ensure_exhausted(&mut parts, "const")?;
+                block.insts.push(Inst::ConstI64 { dst, imm });
             }
             "arg" => {
-                let idx = p.next().context("arg idx")?.parse::<u32>()?;
-                b.insts.push(Inst::ArgI64 { dst, idx: ArgId(idx) });
+                let idx = parts
+                    .next()
+                    .context("missing argument index")?
+                    .parse::<u32>()?;
+                ensure_exhausted(&mut parts, "arg")?;
+                block.insts.push(Inst::ArgI64 {
+                    dst,
+                    idx: ArgId(idx),
+                });
             }
-            "add" => {
-                let a = parse_vreg(p.next().context("a")?)?;
-                let b2 = parse_vreg(p.next().context("b")?)?;
-                b.insts.push(Inst::AddI64 { dst, a, b: b2 });
-            }
-            "mul" => {
-                let a = parse_vreg(p.next().context("a")?)?;
-                let b2 = parse_vreg(p.next().context("b")?)?;
-                b.insts.push(Inst::MulI64 { dst, a, b: b2 });
+            "add" | "mul" | "cmpgt" => {
+                let left = parse_vreg(parts.next().context("missing left operand")?)?;
+                let right = parse_vreg(parts.next().context("missing right operand")?)?;
+                ensure_exhausted(&mut parts, op)?;
+                let inst = match op {
+                    "add" => Inst::AddI64 {
+                        dst,
+                        a: left,
+                        b: right,
+                    },
+                    "mul" => Inst::MulI64 {
+                        dst,
+                        a: left,
+                        b: right,
+                    },
+                    "cmpgt" => Inst::CmpGtI64 {
+                        dst,
+                        a: left,
+                        b: right,
+                    },
+                    _ => unreachable!(),
+                };
+                block.insts.push(inst);
             }
             "mov" => {
-                let s = parse_vreg(p.next().context("src")?)?;
-                b.insts.push(Inst::MovI64 { dst, src: s });
-            }
-            "cmpgt" => {
-                let a = parse_vreg(p.next().context("a")?)?;
-                let b2 = parse_vreg(p.next().context("b")?)?;
-                b.insts.push(Inst::CmpGtI64 { dst, a, b: b2 });
+                let src = parse_vreg(parts.next().context("missing source")?)?;
+                ensure_exhausted(&mut parts, "mov")?;
+                block.insts.push(Inst::MovI64 { dst, src });
             }
             "phi" => {
-                // defer because needs block id mapping
-                let inst_idx = b.insts.len();
-                b.insts.push(Inst::ConstI64 { dst, imm: 0 }); // placeholder
-                pending_phis.push((blocks.len(), inst_idx, rhs.to_string()));
+                let inst_index = block.insts.len();
+                block.insts.push(Inst::ConstI64 { dst, imm: 0 });
+                pending_phis.push((blocks.len(), inst_index, rhs.to_string()));
             }
-            _ => bail!("unknown op: {op}"),
+            _ => bail!("unknown operation: {op}"),
         }
     }
-    if let Some(b) = cur.take() { blocks.push(b); }
-    if blocks.is_empty() { bail!("no blocks"); }
 
-    // Resolve phis
-    for (block_idx, inst_idx, text_phi) in pending_phis {
-        let blk = blocks.get_mut(block_idx).context("bad block idx")?;
-        let mut it = text_phi.split_whitespace();
-        let _phi = it.next().unwrap(); // "phi"
-        let rest: String = it.collect::<Vec<_>>().join(" ");
-        // format: "b1 v3, b2 v4"
+    finish_current(&mut current, current_terminated, &mut blocks)?;
+    anyhow::ensure!(!blocks.is_empty(), "function has no blocks");
+
+    for (block_index, inst_index, phi_text) in pending_phis {
+        let block = blocks
+            .get_mut(block_index)
+            .context("invalid phi block index")?;
+        let mut tokens = phi_text.split_whitespace();
+        anyhow::ensure!(tokens.next() == Some("phi"), "invalid phi placeholder");
+        let rest = tokens.collect::<Vec<_>>().join(" ");
         let mut incoming: SmallVec<[(BlockId, VReg); 2]> = SmallVec::new();
-        for chunk in rest.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()) {
-            let mut p = chunk.split_whitespace();
-            let bname = p.next().context("phi block")?;
-            let vname = p.next().context("phi vreg")?;
-            let bid = *label_to_id.get(bname).context("unknown block label in phi")?;
-            let vr = parse_vreg(vname)?;
-            incoming.push((bid, vr));
+
+        for chunk in rest
+            .split(',')
+            .map(str::trim)
+            .filter(|chunk| !chunk.is_empty())
+        {
+            let mut parts = chunk.split_whitespace();
+            let block_name = parts.next().context("missing phi predecessor")?;
+            let value_name = parts.next().context("missing phi value")?;
+            ensure_exhausted(&mut parts, "phi input")?;
+            let predecessor = *label_to_id
+                .get(block_name)
+                .with_context(|| format!("unknown phi predecessor {block_name}"))?;
+            incoming.push((predecessor, parse_vreg(value_name)?));
         }
-        let dst = match blk.insts[inst_idx] {
-            Inst::ConstI64 { dst, .. } => dst, // placeholder stored dst here
+        anyhow::ensure!(!incoming.is_empty(), "phi must have at least one input");
+
+        let dst = match block.insts.get(inst_index) {
+            Some(Inst::ConstI64 { dst, .. }) => *dst,
             _ => bail!("phi placeholder mismatch"),
         };
-        blk.insts[inst_idx] = Inst::PhiI64 { dst, incoming };
+        block.insts[inst_index] = Inst::PhiI64 { dst, incoming };
     }
 
-    // Resolve terminators
-    for (block_idx, term_text) in pending_terms {
-        let blk = blocks.get_mut(block_idx).context("bad block idx")?;
-        let mut p = term_text.split_whitespace();
-        let op = p.next().unwrap();
-        match op {
+    for (block_index, term_text) in pending_terms {
+        let block = blocks
+            .get_mut(block_index)
+            .context("invalid terminator block index")?;
+        let mut parts = term_text.split_whitespace();
+        let op = parts.next().context("missing terminator")?;
+        block.term = match op {
             "ret" => {
-                let v = parse_vreg(p.next().context("ret vreg")?)?;
-                blk.term = Terminator::Ret { value: v };
+                let value = parse_vreg(parts.next().context("missing return value")?)?;
+                ensure_exhausted(&mut parts, "ret")?;
+                Terminator::Ret { value }
             }
             "jmp" => {
-                let t = p.next().context("jmp target")?.to_string();
-                let bid = *label_to_id.get(&t).context("unknown jmp target")?;
-                blk.term = Terminator::Jmp { target: bid };
+                let target_name = parts.next().context("missing jump target")?;
+                ensure_exhausted(&mut parts, "jmp")?;
+                let target = *label_to_id
+                    .get(target_name)
+                    .with_context(|| format!("unknown jump target {target_name}"))?;
+                Terminator::Jmp { target }
             }
             "br" => {
-                let c = parse_vreg(p.next().context("br cond")?)?;
-                let t = p.next().context("then")?.to_string();
-                let e = p.next().context("else")?.to_string();
-                let tb = *label_to_id.get(&t).context("unknown then bb")?;
-                let eb = *label_to_id.get(&e).context("unknown else bb")?;
-                blk.term = Terminator::Br { cond: c, then_bb: tb, else_bb: eb };
+                let cond = parse_vreg(parts.next().context("missing branch condition")?)?;
+                let then_name = parts.next().context("missing then target")?;
+                let else_name = parts.next().context("missing else target")?;
+                ensure_exhausted(&mut parts, "br")?;
+                let then_bb = *label_to_id
+                    .get(then_name)
+                    .with_context(|| format!("unknown then target {then_name}"))?;
+                let else_bb = *label_to_id
+                    .get(else_name)
+                    .with_context(|| format!("unknown else target {else_name}"))?;
+                Terminator::Br {
+                    cond,
+                    then_bb,
+                    else_bb,
+                }
             }
             _ => bail!("unknown terminator: {op}"),
-        }
+        };
     }
 
-    Ok(Function { name, args, entry: blocks[0].id, blocks })
+    Ok(Function {
+        name,
+        args,
+        entry: blocks[0].id,
+        blocks,
+    })
 }

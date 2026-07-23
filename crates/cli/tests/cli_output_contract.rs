@@ -5,7 +5,14 @@ use std::process::Command;
 #[test]
 fn cli_report_contains_expected_fields() -> Result<()> {
     let out = Command::new(env!("CARGO_BIN_EXE_cli"))
-        .args(["run", "--example", "basicblock", "--regs", "4", "--dump-disasm"])
+        .args([
+            "run",
+            "--example",
+            "basicblock",
+            "--regs",
+            "4",
+            "--dump-disasm",
+        ])
         .output()?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
