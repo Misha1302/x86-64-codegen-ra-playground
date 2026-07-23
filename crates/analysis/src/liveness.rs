@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use indexmap::{IndexMap, IndexSet};
 use ir::{defs, successors, term_uses, uses, BlockId, Function, Inst, VReg};
 
+pub type PhiDefinitions = IndexMap<BlockId, IndexSet<VReg>>;
+pub type PhiEdgeUses = IndexMap<(BlockId, BlockId), IndexSet<VReg>>;
+
 #[derive(Debug, Clone)]
 pub struct BlockLiveness {
     pub live_in: IndexSet<VReg>,
@@ -13,8 +16,8 @@ pub struct BlockLiveness {
 #[derive(Debug, Clone)]
 pub struct Liveness {
     pub per_block: IndexMap<BlockId, BlockLiveness>,
-    pub phi_defs: IndexMap<BlockId, IndexSet<VReg>>,
-    pub phi_uses: IndexMap<(BlockId, BlockId), IndexSet<VReg>>,
+    pub phi_defs: PhiDefinitions,
+    pub phi_uses: PhiEdgeUses,
 }
 
 pub fn build_predecessors(f: &Function) -> Result<IndexMap<BlockId, IndexSet<BlockId>>> {
@@ -40,14 +43,9 @@ pub fn build_predecessors(f: &Function) -> Result<IndexMap<BlockId, IndexSet<Blo
     Ok(predecessors)
 }
 
-fn collect_phi_data(
-    f: &Function,
-) -> (
-    IndexMap<BlockId, IndexSet<VReg>>,
-    IndexMap<(BlockId, BlockId), IndexSet<VReg>>,
-) {
-    let mut phi_defs: IndexMap<BlockId, IndexSet<VReg>> = IndexMap::new();
-    let mut phi_uses: IndexMap<(BlockId, BlockId), IndexSet<VReg>> = IndexMap::new();
+fn collect_phi_data(f: &Function) -> (PhiDefinitions, PhiEdgeUses) {
+    let mut phi_defs = PhiDefinitions::new();
+    let mut phi_uses = PhiEdgeUses::new();
 
     for block in &f.blocks {
         for inst in &block.insts {
