@@ -1,129 +1,89 @@
 # x86-64 Codegen & Register Allocation Playground
 
-Учебный репозиторий для практики **SSA-подобной IR**, **анализа живости**, **аллокации регистров** и **генерации x86-64** (включая минимальный SIMD пример).
+Учебная лаборатория для практики SSA-подобной IR, CFG-aware liveness, live intervals, register allocation и генерации x86-64 SysV-кода через `iced-x86`.
 
-> ⚠️ **Безопасность:** проект генерирует нативный машинный код. Запуск происходит **только** в отдельном процессе (`runner`) с базовыми ограничениями (rlimit + `no_new_privs`). **Не** запускайте непроверенные входные IR/байткод-файлы на боевой машине.
+Проект намеренно небольшой, но путь исполнения настоящий:
 
-## Цели
+`IR → validation → liveness/intervals → allocator → x86-64 emission → isolated runner → interpreter/native differential check`
 
-- Потренироваться в аллокации регистров: *linear scan* (в MVP), дальше — графовая раскраска, PBQP, exact NP (план/скелет).
-- Потренироваться в оптимизациях: live-range splitting, rematerialization, coalescing (план/упражнения).
-- Генерировать и дисассемблировать x86-64 через **iced-x86**.
-- Валидировать семантику: интерпретатор IR vs сгенерированный код.
-- Считать метрики: spills, loads/stores, code size, simulated cost, micro-bench (SIMD vs scalar).
+> **Граница безопасности.** Сгенерированный код выполняется только в отдельном Linux-процессе. Runner применяет `no_new_privs`, `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, W^X-переход `RW → RX`, а родительский CLI ограничивает время процесса. Это снижает последствия ошибок, но **не является полноценной песочницей**: seccomp и namespaces пока не реализованы. Не запускайте непроверенный машинный код на рабочей машине.
 
----
+## Что реализовано
+
+- SSA-подобная `i64` IR: `arg`, `const`, `mov`, `add`, `mul`, `cmpgt`, `phi`, `jmp`, `br`, `ret`.
+- Структурный validator: уникальность определений, достижимость блоков, dominance uses, корректность φ-входов и аргументов.
+- Edge-sensitive φ-liveness и CFG-aware interference graph.
+- Консервативные live intervals, включая ветвления и backedges.
+- Linear scan с корректным all-spill режимом при `--regs 0`.
+- Детерминированный experimental simulated-annealing allocator с обязательным conflict-free repair и финальной проверкой assignment.
+- x86-64 SysV emitter, stack spills, edge-specific φ lowering и parallel-move cycle breaking.
+- Эталонный интерпретатор с параллельной семантикой φ и step limit.
+- Scalar/SSE демонстрация суммирования восьми `f32`. AVX/AVX2 и автоматическая векторизация не заявляются.
+- Differential validation native code против интерпретатора на boundary, randomized, branching и loop cases.
 
 ## Quickstart
 
-Требуется: **Rust (stable)**.
+Требуются Linux x86-64, Rust stable и, для визуализации, Graphviz.
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/Misha1302/x86-64-codegen-ra-playground.git
 cd x86-64-codegen-ra-playground
-cargo test
+
+cargo test --workspace --all-targets
 cargo run -p cli -- run --example basicblock --regs 4 --dump-disasm
-cargo run -p cli -- run --example trace --regs 3 --dump-disasm
+cargo run -p cli -- run --example trace --alloc sim-anneal --regs 2
+cargo run -p cli -- run --example loop-sum --regs 1
+cargo run -p cli -- run --example phi-swap-loop --regs 0 --dump-disasm
 cargo run -p cli -- simd-bench --target auto
+
 cargo run -p viz -- --example basicblock --out /tmp/basic.dot
 dot -Tpng /tmp/basic.dot -o /tmp/basic.png
 ```
 
-### Что вы увидите
+Доступные примеры: `basicblock`, `trace`, `loop-sum`, `phi-swap-loop`.
 
-- Таблицу назначений VReg → PhysReg/Stack
-- Кол-во spills и вставленных loads/stores
-- Размер кода (байты)
-- Дисассемблинг
-- Для SIMD: сравнение scalar vs SIMD по времени и по инструкциям (микробенч в `runner`)
-
----
-
-## Learning path (этапы обучения)
-
-1. **IR и интерпретатор**
-   - Добавьте инструкции, типы, простые оптимизации (CSE, const-fold).
-2. **Liveness → live intervals**
-   - Убедитесь, что интервалы совпадают с ожиданиями на примерах.
-3. **Linear Scan**
-   - Добавьте live-range splitting, heuristics выбора spill-кандидата.
-4. **Interference Graph**
-   - Экспорт `.dot`, визуально проверяйте coalescing.
-5. **Graph Coloring**
-   - Реализуйте Greedy Chaitin/Briggs + coalescing (см. `docs/exercises/02_graph_coloring.md`).
-6. **PBQP**
-   - Подключите внешний solver (или реализуйте малый PBQP).
-7. **Exact allocator**
-   - ILP/CP-SAT (OR-Tools) для маленьких блоков + самописный backtracking+pruning.
-8. **SIMD / Vectorization**
-   - Добавьте шаблоны и авто-векторизацию для простых паттернов.
-9. **Валидация/инварианты**
-   - SSA invariants, dominator tree, корректность φ.
-10. **Metrics & Bench**
-   - Реальные замеры, perf counters (опционально), отчёты.
-
----
+Аллокаторы: `linear-scan` и `sim-anneal`. Допустимое число регистров: `0..=5`; ноль принудительно размещает все значения в stack slots.
 
 ## Архитектура
 
-```
+```text
 crates/
-  ir/                  SSA-подобная IR, парсер, генераторы примеров, интерпретатор
-  analysis/             liveness, live intervals, interference graph, dominators (частично)
-  alloc/                API аллокатора (плагин-интерфейс), общие типы Locations
-  alloc_linear_scan/    референс: linear scan allocator (GP regs)
-  alloc_sim_anneal/     simulated annealing allocator (GP regs + spill penalty)
-  codegen/              lowering + emitter на iced-x86, disasm, метрики codegen
-  runner/               отдельный процесс: mmap+exec байткода, sandbox-ish, bench
-  cli/                  CLI: generate/run/report, вызывает runner
-tools/
-  viz/                  генерация Graphviz .dot (interference graph + intervals)
-docs/
-  exercises/            задания и чек-листы
-.github/workflows/ci.yml
+  ir/                  IR, parser, examples, interpreter
+  analysis/            validation, dominators, φ-aware liveness, intervals, interference
+  alloc/               allocator contract, locations, assignment verifier
+  alloc_linear_scan/   deterministic linear scan
+  alloc_sim_anneal/    deterministic experimental annealing + safe repair
+  codegen/             x86-64 SysV emitter, φ edge moves, disassembly, SIMD demo
+  runner/              separate-process native execution with bounded resources
+  cli/                 compile, report, differential validation, SIMD bench
+
+tools/viz/             Graphviz export
+docs/exercises/        follow-up exercises
 ```
 
-### Extensibility / плагины
+Аллокаторы реализуют trait `alloc::Allocator`. Результат каждого allocator проходит общий `verify_assignment`: полнота, допустимые регистры, stack metadata и отсутствие register conflicts у пересекающихся intervals.
 
-Аллокаторы подключаются через trait `Allocator` (crate `alloc`). Для расширений (PBQP/ILP/CP-SAT) — добавляйте crates, реализующие этот trait, и регистрируйте их в CLI.
+## Проверки
 
----
+CI выполняет:
 
-## CPU target (SSE2/AVX/AVX2)
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo test --workspace --all-targets --release
+```
 
-- `cli simd-bench --target auto` — выберет лучшую доступную цель.
-- `--target sse2|avx|avx2` — принудительно.
-- Если CPU не поддерживает, будет fallback на scalar.
+Ключевые регрессии охватывают:
 
----
+- φ-use на конкретных CFG edges;
+- cross-block и loop-carried liveness;
+- dominance и malformed SSA;
+- zero-register/all-spill allocation;
+- allocator validity по нескольким seeds и уровням register pressure;
+- аргументы, spills, branches, loops и parallel φ cycles;
+- десятки interpreter/native differential cases для каждого встроенного примера.
 
-## Acceptance criteria (MVP)
+## Ограничения
 
-- `cargo test` проходит.
-- `cargo run -p cli -- run --example basicblock` показывает assignment/метрики и дисассембл.
-- Запуск сгенерированного кода происходит **в отдельном процессе** (`runner`).
-- Есть 2 примера: `basicblock` и `trace`, плюс SIMD micro-bench.
-- Есть экспорт `.dot` графа интерференции.
-
----
-
-## Добавление своего аллокатора
-
-1. Создайте crate `crates/alloc_my_allocator`.
-2. Зависимости: `alloc`, `analysis`, `ir`.
-3. Реализуйте `alloc::Allocator`:
-   - вход: `analysis::LiveIntervals`, `alloc::PhysRegSet`, политика (кол-во регов)
-   - выход: `alloc::Assignment` (VReg → Location, + spill slots)
-4. Зарегистрируйте его в `crates/cli/src/allocators.rs`.
-
-Смотрите пример: `crates/alloc_linear_scan`.
-
----
-
-## Документация / упражнения
-
-См. `docs/exercises/`:
-- `01_linear_scan.md`
-- `02_graph_coloring.md` (скелет)
-- `03_exact_allocator.md` (скелет)
-- `04_simd.md` (скелет)
+Это не production compiler backend. Пока отсутствуют register classes, callee-saved register support, calls, memory IR, live-range splitting, coalescing, graph coloring, PBQP, exact allocation, seccomp/namespaces и IR-driven vectorization. Соответствующие направления находятся в `docs/exercises/` и не выдаются за реализованные возможности.

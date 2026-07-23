@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
-use alloc::{Assignment, Location, PhysReg, PhysRegSet, StackSlot};
+use alloc::{verify_assignment, Assignment, Location, PhysReg, PhysRegSet, StackSlot};
+use analysis::{compute_live_intervals, validate_function};
 use iced_x86::code_asm::*;
 use indexmap::IndexMap;
 use ir::{BlockId, Function, Inst, Terminator, VReg};
@@ -17,8 +18,8 @@ pub struct EmittedCode {
     pub metrics: CodegenMetrics,
 }
 
-fn reg64(r: PhysReg) -> AsmRegister64 {
-    match r {
+fn reg64(register: PhysReg) -> AsmRegister64 {
+    match register {
         PhysReg::Rax => rax,
         PhysReg::Rcx => rcx,
         PhysReg::Rdx => rdx,
@@ -32,168 +33,180 @@ fn reg64(r: PhysReg) -> AsmRegister64 {
     }
 }
 
-/// rbp-based frame.
-/// We reserve:
-/// - arg shadow slots: indices [0 .. arg_shadow_slots)
-/// - spill slots: after that, indices [arg_shadow_slots .. arg_shadow_slots + stack_slots)
 fn stack_addr_with_base(arg_shadow_slots: i32, slot: StackSlot) -> AsmMemoryOperand {
-    let idx = arg_shadow_slots + (slot.index as i32);
-    let disp = -8i32 * (idx + 1);
-    qword_ptr(rbp + disp)
+    let index = arg_shadow_slots + slot.index as i32;
+    qword_ptr(rbp - 8_i32 * (index + 1))
 }
 
-fn arg_shadow_addr(arg_idx: i32) -> AsmMemoryOperand {
-    // arg shadow lives starting at slot 0: [rbp-8], [rbp-16], ...
-    let disp = -8i32 * (arg_idx + 1);
-    qword_ptr(rbp + disp)
+fn arg_shadow_addr(arg_index: i32) -> AsmMemoryOperand {
+    qword_ptr(rbp - 8_i32 * (arg_index + 1))
 }
 
 fn get_val(
-    a: &mut CodeAssembler,
-    loc: &IndexMap<VReg, Location>,
+    assembler: &mut CodeAssembler,
+    locations: &IndexMap<VReg, Location>,
     loads: &mut u32,
     arg_shadow_slots: i32,
-    v: VReg,
-    prefer: AsmRegister64,
+    value: VReg,
+    preferred: AsmRegister64,
 ) -> Result<AsmRegister64> {
-    match *loc
-        .get(&v)
-        .ok_or_else(|| anyhow::anyhow!("missing vreg {:?}", v))?
+    match *locations
+        .get(&value)
+        .ok_or_else(|| anyhow::anyhow!("missing vreg {:?}", value))?
     {
-        Location::Reg(r) => Ok(reg64(r)),
+        Location::Reg(register) => Ok(reg64(register)),
         Location::Stack(slot) => {
-            a.mov(prefer, stack_addr_with_base(arg_shadow_slots, slot))?;
+            assembler.mov(preferred, stack_addr_with_base(arg_shadow_slots, slot))?;
             *loads += 1;
-            Ok(prefer)
+            Ok(preferred)
         }
     }
 }
 
 fn set_val(
-    a: &mut CodeAssembler,
-    loc: &IndexMap<VReg, Location>,
+    assembler: &mut CodeAssembler,
+    locations: &IndexMap<VReg, Location>,
     stores: &mut u32,
     arg_shadow_slots: i32,
-    v: VReg,
-    from: AsmRegister64,
+    value: VReg,
+    source: AsmRegister64,
 ) -> Result<()> {
-    match *loc
-        .get(&v)
-        .ok_or_else(|| anyhow::anyhow!("missing vreg {:?}", v))?
+    match *locations
+        .get(&value)
+        .ok_or_else(|| anyhow::anyhow!("missing vreg {:?}", value))?
     {
-        Location::Reg(r) => {
-            let rr = reg64(r);
-            if rr != from {
-                a.mov(rr, from)?;
+        Location::Reg(register) => {
+            let destination = reg64(register);
+            if destination != source {
+                assembler.mov(destination, source)?;
             }
         }
         Location::Stack(slot) => {
-            a.mov(stack_addr_with_base(arg_shadow_slots, slot), from)?;
+            assembler.mov(stack_addr_with_base(arg_shadow_slots, slot), source)?;
             *stores += 1;
         }
     }
     Ok(())
 }
 
-fn lbl(labels: &IndexMap<BlockId, CodeLabel>, id: BlockId) -> CodeLabel {
-    *labels.get(&id).expect("label exists")
+fn label(labels: &IndexMap<BlockId, CodeLabel>, id: BlockId) -> CodeLabel {
+    *labels.get(&id).expect("validated block label")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum L {
+enum MoveLocation {
     Reg(AsmRegister64),
     Stack(StackSlot),
 }
 
-fn loc_of_vreg(loc: &IndexMap<VReg, Location>, v: VReg) -> L {
-    match loc[&v] {
-        Location::Reg(r) => L::Reg(reg64(r)),
-        Location::Stack(s) => L::Stack(s),
+fn move_location(locations: &IndexMap<VReg, Location>, value: VReg) -> MoveLocation {
+    match locations[&value] {
+        Location::Reg(register) => MoveLocation::Reg(reg64(register)),
+        Location::Stack(slot) => MoveLocation::Stack(slot),
     }
 }
 
-fn read_loc_to_reg(
-    a: &mut CodeAssembler,
+fn read_move_location(
+    assembler: &mut CodeAssembler,
     loads: &mut u32,
     arg_shadow_slots: i32,
-    src: L,
-    tmp: AsmRegister64,
+    source: MoveLocation,
+    temporary: AsmRegister64,
 ) -> Result<AsmRegister64> {
-    match src {
-        L::Reg(r) => Ok(r),
-        L::Stack(s) => {
-            a.mov(tmp, stack_addr_with_base(arg_shadow_slots, s))?;
+    match source {
+        MoveLocation::Reg(register) => Ok(register),
+        MoveLocation::Stack(slot) => {
+            assembler.mov(temporary, stack_addr_with_base(arg_shadow_slots, slot))?;
             *loads += 1;
-            Ok(tmp)
+            Ok(temporary)
         }
     }
 }
 
-fn write_reg_to_loc(
-    a: &mut CodeAssembler,
+fn write_move_location(
+    assembler: &mut CodeAssembler,
     stores: &mut u32,
     arg_shadow_slots: i32,
-    dst: L,
-    from: AsmRegister64,
+    destination: MoveLocation,
+    source: AsmRegister64,
 ) -> Result<()> {
-    match dst {
-        L::Reg(r) => {
-            if r != from {
-                a.mov(r, from)?;
+    match destination {
+        MoveLocation::Reg(register) => {
+            if register != source {
+                assembler.mov(register, source)?;
             }
         }
-        L::Stack(s) => {
-            a.mov(stack_addr_with_base(arg_shadow_slots, s), from)?;
+        MoveLocation::Stack(slot) => {
+            assembler.mov(stack_addr_with_base(arg_shadow_slots, slot), source)?;
             *stores += 1;
         }
     }
     Ok(())
 }
 
-/// Emit parallel moves (phi-lowering) safely (handles cycles) using tmp regs.
 fn emit_parallel_moves(
-    a: &mut CodeAssembler,
+    assembler: &mut CodeAssembler,
     loads: &mut u32,
     stores: &mut u32,
     arg_shadow_slots: i32,
-    mut moves: Vec<(L, L)>, // (dst, src)
-    tmp: AsmRegister64,
-    tmp2: AsmRegister64,
+    mut moves: Vec<(MoveLocation, MoveLocation)>,
+    temporary: AsmRegister64,
+    temporary2: AsmRegister64,
 ) -> Result<()> {
-    moves.retain(|(d, s)| d != s);
-    if moves.is_empty() {
-        return Ok(());
-    }
-
-    let srcs = |ms: &Vec<(L, L)>| -> Vec<L> { ms.iter().map(|(_, s)| *s).collect() };
+    moves.retain(|(destination, source)| destination != source);
 
     while !moves.is_empty() {
-        let sources = srcs(&moves);
-
-        if let Some(idx) = moves
+        let sources: Vec<MoveLocation> = moves.iter().map(|(_, source)| *source).collect();
+        if let Some(index) = moves
             .iter()
-            .position(|(d, _)| !sources.iter().any(|s| *s == *d))
+            .position(|(destination, _)| !sources.contains(destination))
         {
-            let (dst, src) = moves.remove(idx);
-            let rsrc = read_loc_to_reg(a, loads, arg_shadow_slots, src, tmp)?;
-            write_reg_to_loc(a, stores, arg_shadow_slots, dst, rsrc)?;
+            let (destination, source) = moves.remove(index);
+            let source_register = read_move_location(
+                assembler,
+                loads,
+                arg_shadow_slots,
+                source,
+                temporary,
+            )?;
+            write_move_location(
+                assembler,
+                stores,
+                arg_shadow_slots,
+                destination,
+                source_register,
+            )?;
             continue;
         }
 
-        // Cycle: break it using tmp (save old dst)
-        let (dst, src) = moves.remove(0);
-
-        let old_dst = read_loc_to_reg(a, loads, arg_shadow_slots, dst, tmp)?;
-        if old_dst != tmp {
-            a.mov(tmp, old_dst)?;
+        let (destination, source) = moves.remove(0);
+        let old_destination = read_move_location(
+            assembler,
+            loads,
+            arg_shadow_slots,
+            destination,
+            temporary,
+        )?;
+        if old_destination != temporary {
+            assembler.mov(temporary, old_destination)?;
         }
-
-        let rsrc = read_loc_to_reg(a, loads, arg_shadow_slots, src, tmp2)?;
-        write_reg_to_loc(a, stores, arg_shadow_slots, dst, rsrc)?;
-
-        for (_, s) in moves.iter_mut() {
-            if *s == dst {
-                *s = L::Reg(tmp);
+        let source_register = read_move_location(
+            assembler,
+            loads,
+            arg_shadow_slots,
+            source,
+            temporary2,
+        )?;
+        write_move_location(
+            assembler,
+            stores,
+            arg_shadow_slots,
+            destination,
+            source_register,
+        )?;
+        for (_, remaining_source) in &mut moves {
+            if *remaining_source == destination {
+                *remaining_source = MoveLocation::Reg(temporary);
             }
         }
     }
@@ -207,239 +220,341 @@ struct Phi {
     incoming: Vec<(BlockId, VReg)>,
 }
 
-fn collect_phis(f: &Function) -> IndexMap<BlockId, Vec<Phi>> {
-    let mut map: IndexMap<BlockId, Vec<Phi>> = IndexMap::new();
-    for b in &f.blocks {
-        for inst in &b.insts {
+fn collect_phis(function: &Function) -> IndexMap<BlockId, Vec<Phi>> {
+    let mut phis = IndexMap::new();
+    for block in &function.blocks {
+        for inst in &block.insts {
             if let Inst::PhiI64 { dst, incoming } = inst {
-                let inc = incoming.iter().copied().collect::<Vec<_>>();
-                map.entry(b.id).or_default().push(Phi { dst: *dst, incoming: inc });
+                phis.entry(block.id).or_insert_with(Vec::new).push(Phi {
+                    dst: *dst,
+                    incoming: incoming.iter().copied().collect(),
+                });
             }
         }
     }
-    map
+    phis
 }
 
 fn phi_moves_for_edge(
     phis: &IndexMap<BlockId, Vec<Phi>>,
-    loc: &IndexMap<VReg, Location>,
-    pred: BlockId,
-    succ: BlockId,
-) -> Vec<(L, L)> {
+    locations: &IndexMap<VReg, Location>,
+    predecessor: BlockId,
+    successor: BlockId,
+) -> Vec<(MoveLocation, MoveLocation)> {
     let mut moves = Vec::new();
-    let Some(list) = phis.get(&succ) else { return moves; };
+    let Some(successor_phis) = phis.get(&successor) else {
+        return moves;
+    };
 
-    for phi in list {
-        if let Some((_, src_v)) = phi.incoming.iter().find(|(bb, _)| *bb == pred) {
-            let dst_l = loc_of_vreg(loc, phi.dst);
-            let src_l = loc_of_vreg(loc, *src_v);
-            if dst_l != src_l {
-                moves.push((dst_l, src_l));
+    for phi in successor_phis {
+        if let Some((_, source)) = phi
+            .incoming
+            .iter()
+            .find(|(block, _)| *block == predecessor)
+        {
+            let destination = move_location(locations, phi.dst);
+            let source = move_location(locations, *source);
+            if destination != source {
+                moves.push((destination, source));
             }
         }
     }
-
     moves
 }
 
 pub fn emit_function_i64(
-    f: &Function,
+    function: &Function,
     assignment: &Assignment,
-    regs: &PhysRegSet,
+    registers: &PhysRegSet,
 ) -> Result<EmittedCode> {
-    if f.args > 6 {
-        bail!("MVP supports up to 6 args");
+    validate_function(function)?;
+    registers.validate_for_codegen()?;
+    if function.args > 6 {
+        bail!("MVP supports up to 6 arguments");
+    }
+    let intervals = compute_live_intervals(function)?;
+    verify_assignment(&intervals, registers, registers.regs.len(), assignment)?;
+
+    let scratch0 = reg64(registers.scratch[0]);
+    let scratch1 = reg64(registers.scratch[1]);
+    let mut assembler = CodeAssembler::new(64)?;
+    let mut loads = 0_u32;
+    let mut stores = 0_u32;
+
+    let arg_shadow_slots = function.args as i32;
+    let spill_slots = i32::try_from(assignment.stack_slots)?;
+    let total_slots = arg_shadow_slots
+        .checked_add(spill_slots)
+        .ok_or_else(|| anyhow::anyhow!("stack frame slot overflow"))?;
+
+    assembler.push(rbp)?;
+    assembler.mov(rbp, rsp)?;
+
+    let aligned_bytes = if total_slots == 0 {
+        0
+    } else {
+        let bytes = total_slots
+            .checked_mul(8)
+            .ok_or_else(|| anyhow::anyhow!("stack frame byte overflow"))?;
+        ((bytes + 15) / 16) * 16
+    };
+    if aligned_bytes > 0 {
+        assembler.sub(rsp, aligned_bytes)?;
     }
 
-    let scratch0 = reg64(*regs.scratch.get(0).unwrap_or(&PhysReg::R10));
-    let scratch1 = reg64(*regs.scratch.get(1).unwrap_or(&PhysReg::R11));
-
-    let mut a = CodeAssembler::new(64)?;
-    let mut loads = 0u32;
-    let mut stores = 0u32;
-
-    // --- Frame layout ---
-    // Reserve arg shadow slots first (so we never clobber incoming arg regs):
-    // shadow_slots = f.args
-    // spill_slots = assignment.stack_slots
-    let arg_shadow_slots = f.args as i32;
-    let spill_slots = assignment.stack_slots as i32;
-    let total_slots = arg_shadow_slots + spill_slots;
-
-    // Prologue
-    a.push(rbp)?;
-    a.mov(rbp, rsp)?;
-
-    let mut aligned = 0i32;
-    if total_slots > 0 {
-        let bytes = total_slots * 8;
-        aligned = ((bytes + 15) / 16) * 16;
-        a.sub(rsp, aligned)?;
-    }
-
-    // Save incoming args into shadow area immediately
-    let arg_regs: [AsmRegister64; 6] = [rdi, rsi, rdx, rcx, r8, r9];
-    for i in 0..(f.args as i32) {
-        a.mov(arg_shadow_addr(i), arg_regs[i as usize])?;
+    let argument_registers: [AsmRegister64; 6] = [rdi, rsi, rdx, rcx, r8, r9];
+    for index in 0..function.args as i32 {
+        assembler.mov(arg_shadow_addr(index), argument_registers[index as usize])?;
         stores += 1;
     }
 
-    let loc: IndexMap<VReg, Location> = assignment.map.clone();
-
-    // Materialize ArgI64 from shadow slots into assigned locations
-    for b in &f.blocks {
-        for inst in &b.insts {
-            if let Inst::ArgI64 { dst, idx } = *inst {
-                let ai = idx.0 as i32; // ArgId newtype
-                // load from shadow slot into scratch0, then store to destination
-                a.mov(scratch0, arg_shadow_addr(ai))?;
-                loads += 1;
-                set_val(&mut a, &loc, &mut stores, arg_shadow_slots, dst, scratch0)?;
-            }
-        }
+    let locations = assignment.map.clone();
+    let mut labels = IndexMap::new();
+    for block in &function.blocks {
+        labels.insert(block.id, assembler.create_label());
     }
+    let phis = collect_phis(function);
+    assembler.jmp(label(&labels, function.entry))?;
 
-    // Labels
-    let mut labels: IndexMap<BlockId, CodeLabel> = IndexMap::new();
-    for b in &f.blocks {
-        labels.insert(b.id, a.create_label());
-    }
+    for block in &function.blocks {
+        let block_label = labels.get_mut(&block.id).expect("validated block label");
+        assembler.set_label(block_label)?;
 
-    // Phi info
-    let phis = collect_phis(f);
-
-    // Jump to entry
-    a.jmp(lbl(&labels, f.entry))?;
-
-    // Emit blocks
-    for b in &f.blocks {
-        let l = labels.get_mut(&b.id).expect("label exists");
-        a.set_label(l)?;
-
-        for inst in &b.insts {
+        for inst in &block.insts {
             match *inst {
                 Inst::ConstI64 { dst, imm } => {
-                    let tmp = match loc[&dst] {
-                        Location::Reg(r) => reg64(r),
+                    let destination = match locations[&dst] {
+                        Location::Reg(register) => reg64(register),
                         Location::Stack(_) => scratch0,
                     };
-                    a.mov(tmp, imm)?;
-                    set_val(&mut a, &loc, &mut stores, arg_shadow_slots, dst, tmp)?;
+                    assembler.mov(destination, imm)?;
+                    set_val(
+                        &mut assembler,
+                        &locations,
+                        &mut stores,
+                        arg_shadow_slots,
+                        dst,
+                        destination,
+                    )?;
                 }
-                Inst::AddI64 { dst, a: va, b: vb } => {
-                    let dst_reg = match loc[&dst] {
-                        Location::Reg(r) => reg64(r),
+                Inst::AddI64 { dst, a, b } => {
+                    let destination = match locations[&dst] {
+                        Location::Reg(register) => reg64(register),
                         Location::Stack(_) => scratch0,
                     };
-
-                    let ra = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, va, dst_reg)?;
-                    if ra != dst_reg {
-                        a.mov(dst_reg, ra)?;
+                    let left = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        a,
+                        destination,
+                    )?;
+                    if left != destination {
+                        assembler.mov(destination, left)?;
                     }
-                    let rb = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, vb, scratch1)?;
-                    a.add(dst_reg, rb)?;
-                    set_val(&mut a, &loc, &mut stores, arg_shadow_slots, dst, dst_reg)?;
+                    let right = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        b,
+                        scratch1,
+                    )?;
+                    assembler.add(destination, right)?;
+                    set_val(
+                        &mut assembler,
+                        &locations,
+                        &mut stores,
+                        arg_shadow_slots,
+                        dst,
+                        destination,
+                    )?;
                 }
-                Inst::MulI64 { dst, a: va, b: vb } => {
-                    let dst_reg = match loc[&dst] {
-                        Location::Reg(r) => reg64(r),
+                Inst::MulI64 { dst, a, b } => {
+                    let destination = match locations[&dst] {
+                        Location::Reg(register) => reg64(register),
                         Location::Stack(_) => scratch0,
                     };
-
-                    let ra = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, va, dst_reg)?;
-                    if ra != dst_reg {
-                        a.mov(dst_reg, ra)?;
+                    let left = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        a,
+                        destination,
+                    )?;
+                    if left != destination {
+                        assembler.mov(destination, left)?;
                     }
-                    let rb = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, vb, scratch1)?;
-                    a.imul_2(dst_reg, rb)?;
-                    set_val(&mut a, &loc, &mut stores, arg_shadow_slots, dst, dst_reg)?;
+                    let right = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        b,
+                        scratch1,
+                    )?;
+                    assembler.imul_2(destination, right)?;
+                    set_val(
+                        &mut assembler,
+                        &locations,
+                        &mut stores,
+                        arg_shadow_slots,
+                        dst,
+                        destination,
+                    )?;
                 }
                 Inst::MovI64 { dst, src } => {
-                    let rsrc = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, src, scratch0)?;
-                    set_val(&mut a, &loc, &mut stores, arg_shadow_slots, dst, rsrc)?;
+                    let source = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        src,
+                        scratch0,
+                    )?;
+                    set_val(
+                        &mut assembler,
+                        &locations,
+                        &mut stores,
+                        arg_shadow_slots,
+                        dst,
+                        source,
+                    )?;
                 }
-                Inst::CmpGtI64 { dst, a: va, b: vb } => {
-                    let ra = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, va, scratch0)?;
-                    let rb = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, vb, scratch1)?;
-                    a.cmp(ra, rb)?;
-                    a.setg(al)?;
-                    a.movzx(scratch0, al)?;
-                    set_val(&mut a, &loc, &mut stores, arg_shadow_slots, dst, scratch0)?;
+                Inst::CmpGtI64 { dst, a, b } => {
+                    let left = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        a,
+                        scratch0,
+                    )?;
+                    let right = get_val(
+                        &mut assembler,
+                        &locations,
+                        &mut loads,
+                        arg_shadow_slots,
+                        b,
+                        scratch1,
+                    )?;
+                    assembler.cmp(left, right)?;
+                    let mut true_label = assembler.create_label();
+                    let mut done_label = assembler.create_label();
+                    assembler.jg(true_label)?;
+                    assembler.mov(scratch0, 0_i64)?;
+                    assembler.jmp(done_label)?;
+                    assembler.set_label(&mut true_label)?;
+                    assembler.mov(scratch0, 1_i64)?;
+                    assembler.set_label(&mut done_label)?;
+                    set_val(
+                        &mut assembler,
+                        &locations,
+                        &mut stores,
+                        arg_shadow_slots,
+                        dst,
+                        scratch0,
+                    )?;
                 }
-                Inst::PhiI64 { .. } => {
-                    // handled by edge moves
-                }
-                Inst::ArgI64 { .. } => {
-                    // already materialized above
+                Inst::PhiI64 { .. } => {}
+                Inst::ArgI64 { dst, idx } => {
+                    assembler.mov(scratch0, arg_shadow_addr(idx.0 as i32))?;
+                    loads += 1;
+                    set_val(
+                        &mut assembler,
+                        &locations,
+                        &mut stores,
+                        arg_shadow_slots,
+                        dst,
+                        scratch0,
+                    )?;
                 }
             }
         }
 
-        match b.term.clone() {
+        match block.term {
             Terminator::Ret { value } => {
-                let rv = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, value, rax)?;
-                if rv != rax {
-                    a.mov(rax, rv)?;
+                let result = get_val(
+                    &mut assembler,
+                    &locations,
+                    &mut loads,
+                    arg_shadow_slots,
+                    value,
+                    rax,
+                )?;
+                if result != rax {
+                    assembler.mov(rax, result)?;
                 }
-                if aligned > 0 {
-                    a.add(rsp, aligned)?;
+                if aligned_bytes > 0 {
+                    assembler.add(rsp, aligned_bytes)?;
                 }
-                a.pop(rbp)?;
-                a.ret()?;
+                assembler.pop(rbp)?;
+                assembler.ret()?;
             }
             Terminator::Jmp { target } => {
-                let mv = phi_moves_for_edge(&phis, &loc, b.id, target);
+                let moves = phi_moves_for_edge(&phis, &locations, block.id, target);
                 emit_parallel_moves(
-                    &mut a,
+                    &mut assembler,
                     &mut loads,
                     &mut stores,
                     arg_shadow_slots,
-                    mv,
+                    moves,
                     scratch0,
                     scratch1,
                 )?;
-                a.jmp(lbl(&labels, target))?;
+                assembler.jmp(label(&labels, target))?;
             }
-            Terminator::Br { cond, then_bb, else_bb } => {
-                let rc = get_val(&mut a, &loc, &mut loads, arg_shadow_slots, cond, scratch0)?;
-                a.test(rc, rc)?;
+            Terminator::Br {
+                cond,
+                then_bb,
+                else_bb,
+            } => {
+                let condition = get_val(
+                    &mut assembler,
+                    &locations,
+                    &mut loads,
+                    arg_shadow_slots,
+                    cond,
+                    scratch0,
+                )?;
+                assembler.test(condition, condition)?;
+                let mut then_stub = assembler.create_label();
+                let mut else_stub = assembler.create_label();
+                assembler.jnz(then_stub)?;
+                assembler.jmp(else_stub)?;
 
-                let mut then_stub = a.create_label();
-                let mut else_stub = a.create_label();
-
-                a.jnz(then_stub)?;
-                a.jmp(else_stub)?;
-
-                a.set_label(&mut then_stub)?;
-                let mv_t = phi_moves_for_edge(&phis, &loc, b.id, then_bb);
+                assembler.set_label(&mut then_stub)?;
+                let then_moves = phi_moves_for_edge(&phis, &locations, block.id, then_bb);
                 emit_parallel_moves(
-                    &mut a,
+                    &mut assembler,
                     &mut loads,
                     &mut stores,
                     arg_shadow_slots,
-                    mv_t,
+                    then_moves,
                     scratch0,
                     scratch1,
                 )?;
-                a.jmp(lbl(&labels, then_bb))?;
+                assembler.jmp(label(&labels, then_bb))?;
 
-                a.set_label(&mut else_stub)?;
-                let mv_e = phi_moves_for_edge(&phis, &loc, b.id, else_bb);
+                assembler.set_label(&mut else_stub)?;
+                let else_moves = phi_moves_for_edge(&phis, &locations, block.id, else_bb);
                 emit_parallel_moves(
-                    &mut a,
+                    &mut assembler,
                     &mut loads,
                     &mut stores,
                     arg_shadow_slots,
-                    mv_e,
+                    else_moves,
                     scratch0,
                     scratch1,
                 )?;
-                a.jmp(lbl(&labels, else_bb))?;
+                assembler.jmp(label(&labels, else_bb))?;
             }
         }
     }
 
-    let bytes = a.assemble(0)?;
+    let bytes = assembler.assemble(0)?;
     Ok(EmittedCode {
         metrics: CodegenMetrics {
             code_size: bytes.len(),
@@ -449,4 +564,3 @@ pub fn emit_function_i64(
         bytes,
     })
 }
-
