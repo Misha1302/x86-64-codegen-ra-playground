@@ -23,7 +23,7 @@
 
 ## Quickstart
 
-Требуются Linux x86-64, Rust stable и, для визуализации, Graphviz.
+Требуются Linux x86-64, Rust stable и, для визуализации, Graphviz. Версии внешних crates зафиксированы в `Cargo.lock`.
 
 ```bash
 git clone https://github.com/Misha1302/x86-64-codegen-ra-playground.git
