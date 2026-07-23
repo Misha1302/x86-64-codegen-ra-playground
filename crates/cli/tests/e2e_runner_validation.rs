@@ -2,7 +2,9 @@ use anyhow::Result;
 use std::process::Command;
 
 fn run_cli(args: &[&str]) -> Result<String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_cli")).args(args).output()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_cli"))
+        .args(args)
+        .output()?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     anyhow::ensure!(output.status.success(), "cli failed:\n{stdout}\n{stderr}");
@@ -37,7 +39,9 @@ fn rejects_unknown_examples_allocators_and_excess_registers() -> Result<()> {
         vec!["run", "--alloc", "missing"],
         vec!["run", "--regs", "6"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_cli")).args(args).output()?;
+        let output = Command::new(env!("CARGO_BIN_EXE_cli"))
+            .args(args)
+            .output()?;
         assert!(!output.status.success());
     }
     Ok(())

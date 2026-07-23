@@ -91,7 +91,10 @@ pub fn validate_function(f: &Function) -> Result<()> {
         for (index, inst) in block.insts.iter().enumerate() {
             match inst {
                 Inst::PhiI64 { .. } if saw_non_phi => {
-                    anyhow::bail!("phi nodes must be contiguous at the start of block {:?}", block.id)
+                    anyhow::bail!(
+                        "phi nodes must be contiguous at the start of block {:?}",
+                        block.id
+                    )
                 }
                 Inst::PhiI64 { .. } => {}
                 _ => saw_non_phi = true,
@@ -172,25 +175,13 @@ pub fn validate_function(f: &Function) -> Result<()> {
                 );
             } else {
                 for used in uses(inst) {
-                    ensure_use_dominated(
-                        used,
-                        block.id,
-                        index,
-                        &definitions,
-                        &dominators,
-                    )?;
+                    ensure_use_dominated(used, block.id, index, &definitions, &dominators)?;
                 }
             }
         }
 
         for used in term_uses(&block.term) {
-            ensure_use_dominated(
-                used,
-                block.id,
-                block.insts.len(),
-                &definitions,
-                &dominators,
-            )?;
+            ensure_use_dominated(used, block.id, block.insts.len(), &definitions, &dominators)?;
         }
     }
 

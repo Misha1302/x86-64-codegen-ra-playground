@@ -24,7 +24,9 @@ fn phi_edges_and_parallel_cycles_work_with_spills() -> Result<()> {
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
-                assert!(String::from_utf8_lossy(&output.stdout).contains("differential cases passed"));
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("differential cases passed")
+                );
             }
         }
     }

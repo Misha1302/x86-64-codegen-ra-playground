@@ -1,7 +1,7 @@
-use anyhow::Result;
 use alloc::{Allocator, PhysRegSet};
 use alloc_linear_scan::LinearScan;
 use analysis::compute_live_intervals;
+use anyhow::Result;
 use codegen::emit_function_i64;
 use ir::examples;
 
@@ -21,4 +21,3 @@ fn emit_is_deterministic_for_basicblock() -> Result<()> {
     assert_eq!(e1.metrics.stores, e2.metrics.stores);
     Ok(())
 }
-

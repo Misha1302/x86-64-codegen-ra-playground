@@ -37,12 +37,8 @@ impl Allocator for LinearScan {
         max_regs: usize,
     ) -> Result<Assignment> {
         let register_limit = max_regs.min(regs.regs.len());
-        let mut free: Vec<alloc::PhysReg> = regs
-            .regs
-            .iter()
-            .copied()
-            .take(register_limit)
-            .collect();
+        let mut free: Vec<alloc::PhysReg> =
+            regs.regs.iter().copied().take(register_limit).collect();
         let mut active: Vec<(LiveInterval, alloc::PhysReg)> = Vec::new();
         let mut map: IndexMap<ir::VReg, Location> = IndexMap::new();
         let mut stack_slots = 0_u32;

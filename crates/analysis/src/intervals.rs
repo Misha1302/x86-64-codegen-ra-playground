@@ -26,12 +26,7 @@ pub struct LiveIntervals {
     pub positions: IndexMap<(ir::BlockId, usize), Pos>,
 }
 
-fn touch(
-    first: &mut IndexMap<VReg, Pos>,
-    last: &mut IndexMap<VReg, Pos>,
-    value: VReg,
-    pos: Pos,
-) {
+fn touch(first: &mut IndexMap<VReg, Pos>, last: &mut IndexMap<VReg, Pos>, value: VReg, pos: Pos) {
     first
         .entry(value)
         .and_modify(|current| *current = (*current).min(pos))

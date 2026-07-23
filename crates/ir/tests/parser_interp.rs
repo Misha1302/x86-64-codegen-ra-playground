@@ -4,7 +4,10 @@ use ir::{examples, interp::Interpreter, parser};
 #[test]
 fn interpreter_matches_built_in_examples() -> Result<()> {
     let interpreter = Interpreter;
-    assert_eq!(interpreter.eval_i64(&examples::basicblock()?, &[2, 3, 4])?, 47);
+    assert_eq!(
+        interpreter.eval_i64(&examples::basicblock()?, &[2, 3, 4])?,
+        47
+    );
     assert_eq!(interpreter.eval_i64(&examples::trace()?, &[10, 7])?, 10);
     assert_eq!(interpreter.eval_i64(&examples::trace()?, &[3, 9])?, 9);
     assert_eq!(interpreter.eval_i64(&examples::loop_sum()?, &[0])?, 0);
@@ -22,10 +25,7 @@ fn interpreter_matches_built_in_examples() -> Result<()> {
 #[test]
 fn parser_rejects_implicit_or_multiple_terminators() {
     assert!(parser::parse("func f args=0\nblock b0:\nv0 = const 1").is_err());
-    assert!(parser::parse(
-        "func f args=0\nblock b0:\nv0 = const 1\nret v0\nret v0"
-    )
-    .is_err());
+    assert!(parser::parse("func f args=0\nblock b0:\nv0 = const 1\nret v0\nret v0").is_err());
 }
 
 #[test]

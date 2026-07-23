@@ -53,20 +53,18 @@ pub fn parse(text: &str) -> Result<Function> {
     let mut pending_terms: Vec<(usize, String)> = Vec::new();
     let mut pending_phis: Vec<(usize, usize, String)> = Vec::new();
 
-    let finish_current = |current: &mut Option<Block>,
-                          terminated: bool,
-                          blocks: &mut Vec<Block>|
-     -> Result<()> {
-        if let Some(block) = current.take() {
-            anyhow::ensure!(
-                terminated,
-                "block {:?} has no explicit terminator",
-                block.id
-            );
-            blocks.push(block);
-        }
-        Ok(())
-    };
+    let finish_current =
+        |current: &mut Option<Block>, terminated: bool, blocks: &mut Vec<Block>| -> Result<()> {
+            if let Some(block) = current.take() {
+                anyhow::ensure!(
+                    terminated,
+                    "block {:?} has no explicit terminator",
+                    block.id
+                );
+                blocks.push(block);
+            }
+            Ok(())
+        };
 
     for line in lines {
         if line.starts_with("block ") {

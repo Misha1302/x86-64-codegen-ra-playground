@@ -28,11 +28,7 @@ pub fn build_predecessors(f: &Function) -> Result<IndexMap<BlockId, IndexSet<Blo
     for block in &f.blocks {
         for successor in successors(&block.term) {
             if !block_ids.contains(&successor) {
-                anyhow::bail!(
-                    "block {:?} has unknown successor {:?}",
-                    block.id,
-                    successor
-                );
+                anyhow::bail!("block {:?} has unknown successor {:?}", block.id, successor);
             }
             predecessors
                 .get_mut(&successor)

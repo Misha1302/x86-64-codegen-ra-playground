@@ -1,7 +1,7 @@
-use anyhow::Result;
 use alloc::{Allocator, PhysRegSet};
 use alloc_linear_scan::LinearScan;
 use analysis::compute_live_intervals;
+use anyhow::Result;
 use codegen::emit_function_i64;
 use ir::{Block, BlockId, Function, Inst, Terminator, VReg};
 use smallvec::smallvec;
@@ -27,14 +27,36 @@ fn phi_parallel_move_cycle_codegen_smoke() -> Result<()> {
     let b0 = Block {
         id: entry,
         insts: vec![
-            Inst::ArgI64 { dst: a0, idx: ir::ArgId(0) },
-            Inst::ArgI64 { dst: a1, idx: ir::ArgId(1) },
-            Inst::CmpGtI64 { dst: c, a: a0, b: a1 },
+            Inst::ArgI64 {
+                dst: a0,
+                idx: ir::ArgId(0),
+            },
+            Inst::ArgI64 {
+                dst: a1,
+                idx: ir::ArgId(1),
+            },
+            Inst::CmpGtI64 {
+                dst: c,
+                a: a0,
+                b: a1,
+            },
         ],
-        term: Terminator::Br { cond: c, then_bb, else_bb },
+        term: Terminator::Br {
+            cond: c,
+            then_bb,
+            else_bb,
+        },
     };
-    let b1 = Block { id: then_bb, insts: vec![], term: Terminator::Jmp { target: join } };
-    let b2 = Block { id: else_bb, insts: vec![], term: Terminator::Jmp { target: join } };
+    let b1 = Block {
+        id: then_bb,
+        insts: vec![],
+        term: Terminator::Jmp { target: join },
+    };
+    let b2 = Block {
+        id: else_bb,
+        insts: vec![],
+        term: Terminator::Jmp { target: join },
+    };
 
     // join:
     // x = phi(then: a1, else: a0)
@@ -43,14 +65,29 @@ fn phi_parallel_move_cycle_codegen_smoke() -> Result<()> {
     let b3 = Block {
         id: join,
         insts: vec![
-            Inst::PhiI64 { dst: x, incoming: smallvec![(then_bb, a1), (else_bb, a0)] },
-            Inst::PhiI64 { dst: y, incoming: smallvec![(then_bb, a0), (else_bb, a1)] },
-            Inst::AddI64 { dst: sum, a: x, b: y },
+            Inst::PhiI64 {
+                dst: x,
+                incoming: smallvec![(then_bb, a1), (else_bb, a0)],
+            },
+            Inst::PhiI64 {
+                dst: y,
+                incoming: smallvec![(then_bb, a0), (else_bb, a1)],
+            },
+            Inst::AddI64 {
+                dst: sum,
+                a: x,
+                b: y,
+            },
         ],
         term: Terminator::Ret { value: sum },
     };
 
-    let f = Function { name: "phi_cycle_swap".into(), args: 2, entry, blocks: vec![b0, b1, b2, b3] };
+    let f = Function {
+        name: "phi_cycle_swap".into(),
+        args: 2,
+        entry,
+        blocks: vec![b0, b1, b2, b3],
+    };
 
     let regs = PhysRegSet::default_gp_with_scratch();
     let li = compute_live_intervals(&f)?;

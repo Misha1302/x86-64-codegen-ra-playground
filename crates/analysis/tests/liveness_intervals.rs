@@ -52,8 +52,7 @@ fn intervals_are_stably_sorted() -> Result<()> {
     let intervals = compute_live_intervals(&function)?;
     for pair in intervals.intervals.windows(2) {
         assert!(
-            (pair[0].start, pair[0].end, pair[0].v.0)
-                <= (pair[1].start, pair[1].end, pair[1].v.0)
+            (pair[0].start, pair[0].end, pair[0].v.0) <= (pair[1].start, pair[1].end, pair[1].v.0)
         );
     }
     Ok(())

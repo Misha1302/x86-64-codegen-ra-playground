@@ -62,10 +62,7 @@ impl Problem {
 
         for left in 0..state.len() {
             for right in &self.overlaps[left] {
-                if *right > left
-                    && state[left] < self.reg_count
-                    && state[left] == state[*right]
-                {
+                if *right > left && state[left] < self.reg_count && state[left] == state[*right] {
                     cost += 1_000_000;
                 }
             }
@@ -181,8 +178,7 @@ impl SimAnneal {
             let next_cost = problem.cost(&current);
             let delta = next_cost - current_cost;
             let accept = delta <= 0
-                || rng.next_f64()
-                    < (-(delta as f64) / temperature.max(f64::MIN_POSITIVE)).exp();
+                || rng.next_f64() < (-(delta as f64) / temperature.max(f64::MIN_POSITIVE)).exp();
             if accept {
                 current_cost = next_cost;
                 if current_cost < best_cost {

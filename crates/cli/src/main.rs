@@ -107,7 +107,10 @@ fn run_runner(spec: &RunnerSpec) -> Result<String> {
     let output = child.wait_with_output()?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    anyhow::ensure!(output.status.success(), "runner failed:\n{stdout}\n{stderr}");
+    anyhow::ensure!(
+        output.status.success(),
+        "runner failed:\n{stdout}\n{stderr}"
+    );
     Ok(stdout)
 }
 
@@ -162,7 +165,10 @@ fn build_runner() -> Result<()> {
         .current_dir(workspace_root())
         .status()
         .context("spawn cargo build -p runner")?;
-    anyhow::ensure!(status.success(), "cargo build -p runner failed with {status}");
+    anyhow::ensure!(
+        status.success(),
+        "cargo build -p runner failed with {status}"
+    );
     Ok(())
 }
 
@@ -296,7 +302,10 @@ fn main() -> Result<()> {
                     expected == actual,
                     "native/interpreter mismatch: expected {expected:?}, got {actual:?}"
                 );
-                println!("\n-- Validation --\n{} differential cases passed", expected.len());
+                println!(
+                    "\n-- Validation --\n{} differential cases passed",
+                    expected.len()
+                );
             }
         }
         Cmd::SimdBench { target, iters } => {

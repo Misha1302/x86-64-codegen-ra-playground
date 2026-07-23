@@ -74,7 +74,10 @@ impl Drop for ExecutableMapping {
 fn apply_limits() -> Result<()> {
     unsafe {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-            bail!("PR_SET_NO_NEW_PRIVS failed: {}", std::io::Error::last_os_error());
+            bail!(
+                "PR_SET_NO_NEW_PRIVS failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
         let cpu = libc::rlimit {
             rlim_cur: 2,
@@ -110,10 +113,11 @@ fn execute_i64(ptr: *mut u8, args: &[i64]) -> Result<i64> {
             [a, b, c] => {
                 std::mem::transmute::<*mut u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(*a, *b, *c)
             }
-            [a, b, c, d] => std::mem::transmute::<
-                *mut u8,
-                extern "C" fn(i64, i64, i64, i64) -> i64,
-            >(ptr)(*a, *b, *c, *d),
+            [a, b, c, d] => {
+                std::mem::transmute::<*mut u8, extern "C" fn(i64, i64, i64, i64) -> i64>(ptr)(
+                    *a, *b, *c, *d,
+                )
+            }
             [a, b, c, d, e] => std::mem::transmute::<
                 *mut u8,
                 extern "C" fn(i64, i64, i64, i64, i64) -> i64,
@@ -150,9 +154,8 @@ fn main() -> Result<()> {
             }
             Spec::Sum8F32 { code, iters } => {
                 let mapping = ExecutableMapping::new(&code)?;
-                let function: extern "C" fn(*const f32) -> f32 = unsafe {
-                    std::mem::transmute(mapping.ptr())
-                };
+                let function: extern "C" fn(*const f32) -> f32 =
+                    unsafe { std::mem::transmute(mapping.ptr()) };
                 let mut values = [0_f32; 8];
                 for (index, value) in values.iter_mut().enumerate() {
                     *value = index as f32 + 0.25;

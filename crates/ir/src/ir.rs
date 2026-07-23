@@ -31,22 +31,47 @@ pub struct Block {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Inst {
-    ConstI64 { dst: VReg, imm: i64 },
-    AddI64 { dst: VReg, a: VReg, b: VReg },
-    MulI64 { dst: VReg, a: VReg, b: VReg },
-    MovI64 { dst: VReg, src: VReg },
-    CmpGtI64 { dst: VReg, a: VReg, b: VReg },
+    ConstI64 {
+        dst: VReg,
+        imm: i64,
+    },
+    AddI64 {
+        dst: VReg,
+        a: VReg,
+        b: VReg,
+    },
+    MulI64 {
+        dst: VReg,
+        a: VReg,
+        b: VReg,
+    },
+    MovI64 {
+        dst: VReg,
+        src: VReg,
+    },
+    CmpGtI64 {
+        dst: VReg,
+        a: VReg,
+        b: VReg,
+    },
     PhiI64 {
         dst: VReg,
         incoming: SmallVec<[(BlockId, VReg); 2]>,
     },
-    ArgI64 { dst: VReg, idx: ArgId },
+    ArgI64 {
+        dst: VReg,
+        idx: ArgId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Terminator {
-    Ret { value: VReg },
-    Jmp { target: BlockId },
+    Ret {
+        value: VReg,
+    },
+    Jmp {
+        target: BlockId,
+    },
     Br {
         cond: VReg,
         then_bb: BlockId,
@@ -101,9 +126,9 @@ pub fn defs(inst: &Inst) -> Option<VReg> {
 pub fn uses(inst: &Inst) -> SmallVec<[VReg; 4]> {
     match *inst {
         Inst::ConstI64 { .. } | Inst::ArgI64 { .. } => SmallVec::new(),
-        Inst::AddI64 { a, b, .. }
-        | Inst::MulI64 { a, b, .. }
-        | Inst::CmpGtI64 { a, b, .. } => smallvec![a, b],
+        Inst::AddI64 { a, b, .. } | Inst::MulI64 { a, b, .. } | Inst::CmpGtI64 { a, b, .. } => {
+            smallvec![a, b]
+        }
         Inst::MovI64 { src, .. } => smallvec![src],
         Inst::PhiI64 { ref incoming, .. } => incoming.iter().map(|(_, value)| *value).collect(),
     }

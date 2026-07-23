@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
 use alloc::{verify_assignment, Assignment, Location, PhysReg, PhysRegSet, StackSlot};
 use analysis::{compute_live_intervals, validate_function};
+use anyhow::{bail, Result};
 use iced_x86::code_asm::*;
 use indexmap::IndexMap;
 use ir::{BlockId, Function, Inst, Terminator, VReg};
@@ -162,13 +162,8 @@ fn emit_parallel_moves(
             .position(|(destination, _)| !sources.contains(destination))
         {
             let (destination, source) = moves.remove(index);
-            let source_register = read_move_location(
-                assembler,
-                loads,
-                arg_shadow_slots,
-                source,
-                temporary,
-            )?;
+            let source_register =
+                read_move_location(assembler, loads, arg_shadow_slots, source, temporary)?;
             write_move_location(
                 assembler,
                 stores,
@@ -180,23 +175,13 @@ fn emit_parallel_moves(
         }
 
         let (destination, source) = moves.remove(0);
-        let old_destination = read_move_location(
-            assembler,
-            loads,
-            arg_shadow_slots,
-            destination,
-            temporary,
-        )?;
+        let old_destination =
+            read_move_location(assembler, loads, arg_shadow_slots, destination, temporary)?;
         if old_destination != temporary {
             assembler.mov(temporary, old_destination)?;
         }
-        let source_register = read_move_location(
-            assembler,
-            loads,
-            arg_shadow_slots,
-            source,
-            temporary2,
-        )?;
+        let source_register =
+            read_move_location(assembler, loads, arg_shadow_slots, source, temporary2)?;
         write_move_location(
             assembler,
             stores,
@@ -247,11 +232,7 @@ fn phi_moves_for_edge(
     };
 
     for phi in successor_phis {
-        if let Some((_, source)) = phi
-            .incoming
-            .iter()
-            .find(|(block, _)| *block == predecessor)
-        {
+        if let Some((_, source)) = phi.incoming.iter().find(|(block, _)| *block == predecessor) {
             let destination = move_location(locations, phi.dst);
             let source = move_location(locations, *source);
             if destination != source {

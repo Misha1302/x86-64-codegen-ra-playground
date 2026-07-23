@@ -1,7 +1,7 @@
 use alloc::{Allocator, PhysRegSet};
 use alloc_linear_scan::LinearScan;
 use analysis::compute_live_intervals;
-use codegen::{emit_function_i64, disasm};
+use codegen::{disasm, emit_function_i64};
 use ir::examples;
 
 #[test]

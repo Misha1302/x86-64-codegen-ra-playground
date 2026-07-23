@@ -20,7 +20,11 @@ impl Dominators {
 pub fn compute_dominators(f: &Function) -> Result<Dominators> {
     let blocks: Vec<BlockId> = f.blocks.iter().map(|block| block.id).collect();
     let all: IndexSet<BlockId> = blocks.iter().copied().collect();
-    anyhow::ensure!(all.contains(&f.entry), "entry block {:?} is missing", f.entry);
+    anyhow::ensure!(
+        all.contains(&f.entry),
+        "entry block {:?} is missing",
+        f.entry
+    );
 
     let predecessors = build_predecessors(f)?;
     let mut dom = IndexMap::new();

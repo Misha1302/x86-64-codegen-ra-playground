@@ -79,7 +79,10 @@ impl PhysRegSet {
     pub fn validate_for_codegen(&self) -> Result<()> {
         let mut all = HashSet::new();
         for register in &self.regs {
-            anyhow::ensure!(all.insert(*register), "duplicate allocatable register {register:?}");
+            anyhow::ensure!(
+                all.insert(*register),
+                "duplicate allocatable register {register:?}"
+            );
             anyhow::ensure!(
                 *register != PhysReg::Rbx,
                 "RBX is callee-saved and is not supported by the MVP prologue"
@@ -90,7 +93,10 @@ impl PhysRegSet {
             "codegen requires two dedicated scratch registers"
         );
         for register in &self.scratch {
-            anyhow::ensure!(all.insert(*register), "scratch register overlaps allocatable set");
+            anyhow::ensure!(
+                all.insert(*register),
+                "scratch register overlaps allocatable set"
+            );
             anyhow::ensure!(
                 *register != PhysReg::Rbx,
                 "RBX is callee-saved and cannot be used as scratch"
@@ -116,7 +122,11 @@ pub fn verify_assignment(
         .copied()
         .take(max_regs.min(regs.regs.len()))
         .collect();
-    let expected: HashSet<VReg> = intervals.intervals.iter().map(|interval| interval.v).collect();
+    let expected: HashSet<VReg> = intervals
+        .intervals
+        .iter()
+        .map(|interval| interval.v)
+        .collect();
 
     anyhow::ensure!(
         assignment.map.len() == expected.len(),
@@ -132,7 +142,11 @@ pub fn verify_assignment(
         );
     }
     for value in assignment.map.keys() {
-        anyhow::ensure!(expected.contains(value), "assignment contains unknown value {:?}", value);
+        anyhow::ensure!(
+            expected.contains(value),
+            "assignment contains unknown value {:?}",
+            value
+        );
     }
 
     let mut stack_count = 0_u32;
@@ -154,15 +168,17 @@ pub fn verify_assignment(
                 );
             }
             Location::Stack(slot) => {
-                stack_count = stack_count
-                    .checked_add(1)
-                    .context("spill count overflow")?;
-                highest_slot = Some(highest_slot.map_or(slot.index, |current: u32| current.max(slot.index)));
+                stack_count = stack_count.checked_add(1).context("spill count overflow")?;
+                highest_slot =
+                    Some(highest_slot.map_or(slot.index, |current: u32| current.max(slot.index)));
             }
         }
     }
 
-    anyhow::ensure!(assignment.spills == stack_count, "spill count does not match stack assignments");
+    anyhow::ensure!(
+        assignment.spills == stack_count,
+        "spill count does not match stack assignments"
+    );
     let expected_slots = highest_slot.map_or(0, |slot| slot.saturating_add(1));
     anyhow::ensure!(
         assignment.stack_slots == expected_slots,
