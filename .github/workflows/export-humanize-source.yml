@@ -1,8 +1,8 @@
 name: Export humanize source
 
 on:
-  push:
-    branches: [refactor/human-authored-style]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
