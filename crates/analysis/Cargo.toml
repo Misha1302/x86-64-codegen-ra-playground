@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+thiserror.workspace = true
 smallvec.workspace = true
 indexmap.workspace = true
 petgraph.workspace = true

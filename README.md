@@ -2,106 +2,70 @@
 
 [![CI](https://github.com/Misha1302/x86-64-codegen-ra-playground/actions/workflows/ci.yml/badge.svg)](https://github.com/Misha1302/x86-64-codegen-ra-playground/actions/workflows/ci.yml)
 
-Учебная лаборатория compiler backend’а: небольшая SSA-подобная IR проходит структурную проверку, анализ живости, аллокацию регистров, генерацию x86-64 SysV-кода и differential-проверку против интерпретатора.
+Это небольшой учебный backend компилятора. Я сделал его, чтобы отдельно разобраться с теми частями генерации кода, которые обычно теряются внутри большого проекта: живостью значений, `phi`-узлами, spills, назначением регистров и проверкой результата аллокатора.
+
+Рабочий путь выглядит так:
 
 ```text
-IR
- └─ validate SSA / CFG invariants
-     └─ edge-sensitive liveness and live intervals
-         └─ register allocator
-             └─ assignment verifier
-                 └─ x86-64 lowering and emission
-                     └─ isolated runner
-                         └─ interpreter/native differential oracle
+IR -> проверка SSA/CFG -> анализ живости -> распределение регистров
+   -> проверка раскладки -> генерация x86-64 SysV-кода
+   -> запуск в отдельном процессе -> сравнение с интерпретатором
 ```
 
-Проект предназначен для изучения инвариантов backend’а и экспериментов с allocator’ами. Это не production compiler backend и не средство безопасного запуска недоверенного машинного кода.
+Проект не претендует на production-ready backend. Его цель — сделать инварианты видимыми и дать место для экспериментов с разными аллокаторами.
 
-## Реализовано
+## Что уже работает
 
-### IR и анализ
-
-- `i64`-инструкции: `arg`, `const`, `mov`, `add`, `mul`, `cmpgt`, `phi`;
-- terminators: `jmp`, `br`, `ret`;
+- компактная `i64` IR с `arg`, `const`, `mov`, `add`, `mul`, `cmpgt` и `phi`;
+- переходы `jmp`, `br` и `ret`;
 - parser и эталонный интерпретатор;
-- validator для уникальности определений, CFG reachability, dominance, порядка φ и состава φ-входов;
-- edge-sensitive φ-liveness;
-- консервативные live intervals для ветвлений и backedges;
-- CFG-aware interference graph.
-
-### Register allocation
-
-- deterministic linear scan;
-- experimental deterministic simulated annealing;
-- режим `--regs 0`, принудительно размещающий значения в stack slots;
-- единый verifier результата allocator’а:
-  - назначение для каждого live interval;
-  - только разрешённые allocatable registers;
-  - запрет scratch registers;
-  - согласованные `spills` и `stack_slots`;
-  - отсутствие register conflicts;
-  - отсутствие aliasing одного stack slot у пересекающихся live intervals;
-  - reuse stack slot разрешён для непересекающихся интервалов.
-
-### Code generation и execution
-
-- x86-64 SysV emitter через `iced-x86`;
-- stack spills и argument shadow slots;
-- edge-specific φ-lowering;
-- parallel-copy cycle breaking;
-- scalar/SSE демонстрация `sum8(f32)`;
-- запуск нативного кода только на **Linux x86-64** в отдельном процессе;
-- `RW → RX` mapping, `no_new_privs`, resource limits и parent-side timeout;
-- concurrent draining stdout/stderr, чтобы большой корректный вывод не блокировал runner.
+- проверка достижимости, единственности определений, dominance и корректности `phi`;
+- учёт `phi`-входов на конкретных рёбрах CFG;
+- live intervals и граф конфликтов;
+- детерминированный linear scan;
+- экспериментальный simulated annealing с фиксируемым seed;
+- verifier раскладки, который запрещает конфликты и разрешает переиспользовать stack slot только после смерти значения;
+- x86-64 SysV emitter на `iced-x86`;
+- lowering `phi` на рёбрах CFG и разрыв циклов параллельных перемещений;
+- дифференциальная проверка нативного кода против интерпретатора;
+- отдельная scalar/SSE демонстрация суммирования восьми `f32`.
 
 ## Быстрый запуск
 
-Требуются Linux x86-64 и Rust stable. Graphviz нужен только для `.dot`-визуализации. Версии внешних crates закреплены в `Cargo.lock`.
+Нужны Linux x86-64 и Rust stable. Graphviz требуется только для визуализации CFG.
 
 ```bash
 git clone https://github.com/Misha1302/x86-64-codegen-ra-playground.git
 cd x86-64-codegen-ra-playground
 
 cargo test --workspace --all-targets
+
 cargo run -p cli -- run --example basicblock --regs 4 --dump-disasm
 cargo run -p cli -- run --example trace --alloc sim-anneal --regs 2
 cargo run -p cli -- run --example loop-sum --regs 1
-cargo run -p cli -- run --example phi-swap-loop --regs 0 --dump-disasm
-cargo run -p cli -- simd-bench --target auto
+cargo run -p cli -- run --example phi-swap-loop --regs 0
+
+cargo run -p viz -- --example basicblock --out /tmp/basic.dot
+dot -Tpng /tmp/basic.dot -o /tmp/basic.png
 ```
 
-Доступные примеры: `basicblock`, `trace`, `loop-sum`, `phi-swap-loop`. Allocator’ы: `linear-scan`, `sim-anneal`. Допустимое число регистров: `0..=5`.
+Примеры: `basicblock`, `trace`, `loop-sum`, `phi-swap-loop`.
 
-## Что проверяет `cli run`
+Аллокаторы: `linear-scan`, `sim-anneal`.
 
-По умолчанию CLI:
+`--regs 0` принудительно отправляет все значения в stack slots. Это простой способ проверить путь со spills без искусственно подобранного примера.
 
-1. валидирует IR;
-2. строит live intervals;
-3. запускает allocator;
-4. проверяет `Assignment`;
-5. генерирует машинный код;
-6. выполняет boundary и deterministic-random cases в runner;
-7. выполняет те же cases в интерпретаторе;
-8. сравнивает результаты целиком.
+## Как проверяется корректность
 
-Успешный вывод содержит `N differential cases passed`. Отключение через `--validate=false` предназначено только для локальной диагностики, а не для CI или ревью.
+У каждого слоя свой oracle:
 
-## Тестовая стратегия
+- validator возвращает типизированную ошибку для конкретного нарушения IR;
+- verifier раскладки запрещает пропущенные значения, недоступные регистры и конфликты live intervals;
+- codegen-тесты проверяют аргументы, spills, ветвления и parallel `phi` moves;
+- CLI исполняет одни и те же входы в интерпретаторе и в сгенерированном x86-64 коде;
+- тесты runner отдельно проверяют большой вывод и остановку зацикленного машинного кода по лимиту времени.
 
-Тесты организованы вокруг контрактов, а не вокруг числа файлов.
-
-| Уровень | Защищаемый контракт | Примеры |
-|---|---|---|
-| IR/parser | вход разбирается однозначно либо отклоняется | terminator rules, malformed input |
-| Validator | только корректная SSA/CFG достигает анализов и codegen | duplicate defs, reachability, dominance, malformed φ, invalid args |
-| Liveness | φ-use принадлежит конкретному CFG edge | branches, backedges, loop-carried values |
-| Assignment verifier | location assignment не разрушает одновременно живые значения | register conflicts, scratch misuse, stack-slot aliasing, metadata |
-| Codegen | lowering сохраняет семантику при pressure и spills | arguments, comparisons, branches, parallel φ moves |
-| Runner | отдельный процесс завершается и отдаёт полный output | timeout, 4096 cases, output larger than a typical pipe buffer |
-| End-to-end | native result совпадает с reference interpreter | 4 CFG examples × 2 allocator’а × pressure `0/1/2/5` |
-
-Полная локальная проверка:
+Полная локальная проверка совпадает с CI:
 
 ```bash
 cargo fmt --all -- --check
@@ -110,52 +74,32 @@ cargo test --workspace --all-targets
 cargo test --workspace --all-targets --release
 ```
 
-CI дополнительно запускает differential smoke matrix с all-spill, branch, loop и φ-cycle cases.
-
-## Архитектура
+## Структура репозитория
 
 ```text
-crates/
-  ir/                  IR, parser, examples, reference interpreter
-  analysis/            validator, dominators, liveness, intervals, interference
-  alloc/               allocator contract, locations, assignment verifier
-  alloc_linear_scan/   deterministic linear scan
-  alloc_sim_anneal/    deterministic annealing + conflict-free repair
-  codegen/             x86-64 SysV emitter, frame/spill handling, φ edge moves
-  runner/              separate-process native execution with bounded resources
-  cli/                 orchestration, reports and differential validation
-
-tools/viz/             Graphviz export
-docs/exercises/        optional follow-up exercises
+crates/ir/                  IR, parser, examples, interpreter
+crates/analysis/            validation, dominators, liveness, intervals
+crates/alloc/               контракт аллокатора и verifier раскладки
+crates/alloc_linear_scan/   linear scan
+crates/alloc_sim_anneal/    simulated annealing и conflict-free repair
+crates/codegen/             x86-64 emitter, spills, phi lowering, disassembly
+crates/runner/              выполнение сгенерированного кода в дочернем процессе
+crates/cli/                 сборка pipeline и сравнение с интерпретатором
+tools/viz/                  экспорт CFG в Graphviz
 ```
 
-## Добавление allocator’а
+Новый аллокатор должен реализовать `alloc::Allocator`, вернуть `Assignment` для всех live intervals и пройти общий `verify_assignment`. После этого его нужно добавить в `crates/cli/src/allocators.rs` и включить в дифференциальные тесты на ветвлениях, циклах и разном давлении на регистры.
 
-1. Создайте crate, зависящий от `alloc`, `analysis` и `ir`.
-2. Реализуйте `alloc::Allocator`.
-3. Возвращайте полный `Assignment` для каждого interval.
-4. Пропускайте результат через `verify_assignment`.
-5. Зарегистрируйте allocator в `crates/cli/src/allocators.rs`.
-6. Добавьте deterministic test, pressure matrix, verifier-negative test и interpreter/native differential cases для branch и loop CFG.
+## Почему код запускается в отдельном процессе
 
-`Assignment` contract:
+Ошибка в emitter может привести к падению или бесконечному циклу. Поэтому CLI передаёт машинный код маленькому runner-процессу, читает его `stdout` и `stderr` параллельно и останавливает процесс по лимиту времени.
 
-- `spills` — число virtual values, назначенных в stack;
-- `stack_slots` — размер адресуемого пространства slots (`max(index) + 1`);
-- один slot может переиспользоваться только непересекающимися live intervals.
+Runner применяет `no_new_privs`, ограничения CPU, памяти и файловых дескрипторов, а mapping переводится из `RW` в `RX`. Это уменьшает последствия ошибок, но не делает runner песочницей: здесь нет seccomp, namespaces и защиты от враждебного машинного кода.
 
-## Граница безопасности runner’а
+Не используйте его для запуска непроверенного ввода на рабочей машине.
 
-Runner уменьшает последствия ошибок generated code, но не образует security boundary для hostile input.
+## Ограничения
 
-Есть: отдельный процесс, W^X `RW → RX`, `PR_SET_NO_NEW_PRIVS`, `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, ограничения размера кода/cases и внешний timeout.
+Пока нет calls, memory IR, register classes, callee-saved register allocation, live-range splitting, coalescing, spill-cost model, graph coloring, PBQP, exact allocation и AVX/AVX2 backend.
 
-Нет: seccomp, namespaces/container isolation, syscall filtering и защиты от kernel-level exploits.
-
-**Не запускайте непроверенный IR или машинный код на рабочей или боевой машине.**
-
-## Ограничения и non-goals
-
-Пока отсутствуют register classes, полноценные callee-saved registers, calls, memory IR, live-range splitting, coalescing, spill-cost model, graph coloring, PBQP, exact allocation, seccomp/namespaces, IR-driven vectorization и AVX/AVX2 backend.
-
-Scalar/SSE micro-benchmark является демонстрацией code emission и runner path. Он не доказывает универсальное ускорение SIMD и не должен цитироваться как производительный benchmark без отдельной воспроизводимой методики.
+SIMD-команда показывает только путь генерации и запуска кода. Это не воспроизводимое сравнение производительности, поэтому её результаты нельзя переносить на другие программы без отдельного измерения.

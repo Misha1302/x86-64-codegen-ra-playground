@@ -1,0 +1,13 @@
++ cat humanize-update.part00 humanize-update.part01 humanize-update.part02 humanize-update.part030 humanize-update.part031 humanize-update.part032
++ base64 -d
+++ sha256sum /tmp/humanize-update.tar.gz
+++ cut '-d ' -f1
++ test 8f3874582df78b96eff4d21ec479b62523d064d2c362b6817f000c70979186cf = 8f3874582df78b96eff4d21ec479b62523d064d2c362b6817f000c70979186cf
++ tar -xzf /tmp/humanize-update.tar.gz
++ rm -f humanize-update.part00 humanize-update.part01 humanize-update.part02 humanize-update.part030 humanize-update.part031 humanize-update.part032
++ rm -f .github/workflows/apply-humanize-refactor.yml
++ rm -f .github/workflows/export-humanize-source.yml
++ cargo fmt --all
++ git config user.name 'github-actions[bot]'
++ git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
++ git add -A
