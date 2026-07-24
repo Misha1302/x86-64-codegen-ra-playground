@@ -26,45 +26,16 @@ jobs:
           base64 -d update.b64 > /tmp/update.tar.gz
           tar -xzf /tmp/update.tar.gz
           rm -f update.b64 TEMP.md
-          rm -f .github/workflows/apply-readme-tests.yml
-          rm -f .github/workflows/export-review-source.yml
-          cat > .github/workflows/ci.yml <<'YAML'
-          name: CI
-
-          on:
-            push:
-            pull_request:
-
-          permissions:
-            contents: read
-
-          jobs:
-            quality:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: dtolnay/rust-toolchain@stable
-                  with:
-                    components: rustfmt, clippy
-                - name: Formatting
-                  run: cargo fmt --all -- --check
-                - name: Clippy
-                  run: cargo clippy --workspace --all-targets -- -D warnings
-                - name: Debug tests
-                  run: cargo test --workspace --all-targets
-                - name: Release tests
-                  run: cargo test --workspace --all-targets --release
-                - name: Differential smoke matrix
-                  run: |
-                    cargo run -p cli -- run --example basicblock --alloc linear-scan --regs 0
-                    cargo run -p cli -- run --example trace --alloc sim-anneal --regs 2
-                    cargo run -p cli -- run --example loop-sum --alloc linear-scan --regs 1
-                    cargo run -p cli -- run --example phi-swap-loop --alloc sim-anneal --regs 2
-          YAML
           cargo fmt --all
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
+          git add README.md \
+            crates/alloc/src/lib.rs \
+            crates/alloc/tests/assignment_validation.rs \
+            crates/analysis/tests/validation.rs \
+            crates/cli/src/main.rs \
+            crates/runner/src/main.rs
+          git add -u update.b64 TEMP.md
           git commit -m 'test: strengthen behavioral contracts and README'
           git push
       - name: Formatting
