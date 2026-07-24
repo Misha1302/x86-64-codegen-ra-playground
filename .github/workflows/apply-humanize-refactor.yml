@@ -14,11 +14,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Apply prepared changes
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           cat humanize-update.part* | base64 -d > /tmp/humanize-update.tar.gz
+          test "$(sha256sum /tmp/humanize-update.tar.gz | cut -d' ' -f1)" = "8f3874582df78b96eff4d21ec479b62523d064d2c362b6817f000c70979186cf"
           tar -xzf /tmp/humanize-update.tar.gz
           rm -f humanize-update.part*
           rm -f .github/workflows/apply-humanize-refactor.yml
