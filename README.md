@@ -150,7 +150,7 @@ Runner уменьшает последствия ошибок generated code, н
 
 Есть: отдельный процесс, W^X `RW → RX`, `PR_SET_NO_NEW_PRIVS`, `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, ограничения размера кода/cases и внешний timeout.
 
-Нет: seccomp, namespaces/container isolation, syscall filtering и бащиты от kernel-level exploits.
+Нет: seccomp, namespaces/container isolation, syscall filtering и защиты от kernel-level exploits.
 
 **Не запускайте непроверенный IR или машинный код на рабочей или боевой машине.**
 
