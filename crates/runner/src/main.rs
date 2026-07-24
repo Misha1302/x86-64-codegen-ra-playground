@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,7 @@ use std::fs;
 use std::time::Instant;
 
 const MAX_CODE_SIZE: usize = 1024 * 1024;
+const MAX_SPEC_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_CASES: usize = 4096;
 
 #[derive(Parser)]
@@ -31,6 +34,8 @@ impl ExecutableMapping {
     fn new(code: &[u8]) -> Result<Self> {
         anyhow::ensure!(!code.is_empty(), "generated code is empty");
         anyhow::ensure!(code.len() <= MAX_CODE_SIZE, "generated code is too large");
+        // SAFETY: `mmap` is called with a null hint and an anonymous private mapping.
+        // The returned pointer is checked before it is used, and `size` is kept for `munmap`.
         unsafe {
             let ptr = libc::mmap(
                 std::ptr::null_mut(),
@@ -64,6 +69,8 @@ impl ExecutableMapping {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl Drop for ExecutableMapping {
     fn drop(&mut self) {
+        // SAFETY: `ptr` and `size` come from the successful `mmap` in `new`, and this
+        // object owns the mapping, so it is unmapped exactly once here.
         unsafe {
             libc::munmap(self.ptr.cast(), self.size);
         }
@@ -72,6 +79,8 @@ impl Drop for ExecutableMapping {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_limits() -> Result<()> {
+    // SAFETY: these calls only change limits and process attributes of the current runner
+    // process. All return values are checked before execution continues.
     unsafe {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             bail!(
@@ -105,6 +114,9 @@ fn apply_limits() -> Result<()> {
 }
 
 fn execute_i64(ptr: *mut u8, args: &[i64]) -> Result<i64> {
+    // SAFETY: `ptr` points to an RX mapping that remains alive for the duration of the
+    // call. The emitter and this dispatch agree on the SysV C ABI and support at most
+    // six `i64` arguments. Invalid generated code is isolated in this child process.
     unsafe {
         Ok(match args {
             [] => std::mem::transmute::<*mut u8, extern "C" fn() -> i64>(ptr)(),
@@ -138,9 +150,16 @@ fn main() -> Result<()> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         let args = Args::parse();
+        apply_limits()?;
+
+        let metadata = fs::metadata(&args.spec).context("read spec metadata")?;
+        anyhow::ensure!(
+            metadata.len() <= MAX_SPEC_SIZE,
+            "runner spec is too large: {} bytes",
+            metadata.len()
+        );
         let data = fs::read(&args.spec).context("read spec")?;
         let spec: Spec = serde_json::from_slice(&data).context("parse spec JSON")?;
-        apply_limits()?;
 
         match spec {
             Spec::I64Cases { code, args } => {
@@ -154,6 +173,8 @@ fn main() -> Result<()> {
             }
             Spec::Sum8F32 { code, iters } => {
                 let mapping = ExecutableMapping::new(&code)?;
+                // SAFETY: the mapping is RX and remains alive while the function runs. The
+                // SIMD emitter produces the exact `extern "C" fn(*const f32) -> f32` ABI.
                 let function: extern "C" fn(*const f32) -> f32 =
                     unsafe { std::mem::transmute(mapping.ptr()) };
                 let mut values = [0_f32; 8];

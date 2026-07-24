@@ -1,162 +1,190 @@
-use alloc::{verify_assignment, Assignment, Location, PhysReg, PhysRegSet, StackSlot};
+use alloc::{
+    verify_assignment, Assignment, AssignmentError, Location, PhysReg, PhysRegSet, StackSlot,
+};
 use analysis::{LiveInterval, LiveIntervals, Pos};
 use indexmap::IndexMap;
 use ir::VReg;
 
-fn overlapping_intervals() -> LiveIntervals {
+fn intervals(first: (u32, u32), second: (u32, u32)) -> LiveIntervals {
     LiveIntervals {
         intervals: vec![
             LiveInterval {
                 v: VReg(0),
-                start: Pos(0),
-                end: Pos(3),
+                start: Pos(first.0),
+                end: Pos(first.1),
             },
             LiveInterval {
                 v: VReg(1),
-                start: Pos(2),
-                end: Pos(5),
+                start: Pos(second.0),
+                end: Pos(second.1),
             },
         ],
         positions: IndexMap::new(),
     }
 }
 
-fn non_overlapping_intervals() -> LiveIntervals {
-    LiveIntervals {
-        intervals: vec![
-            LiveInterval {
-                v: VReg(0),
-                start: Pos(0),
-                end: Pos(1),
-            },
-            LiveInterval {
-                v: VReg(1),
-                start: Pos(2),
-                end: Pos(5),
-            },
-        ],
-        positions: IndexMap::new(),
+fn assignment(first: Location, second: Location, stack_slots: u32, spills: u32) -> Assignment {
+    Assignment {
+        map: IndexMap::from([(VReg(0), first), (VReg(1), second)]),
+        stack_slots,
+        spills,
     }
 }
 
-fn assert_error_contains(result: anyhow::Result<()>, expected: &str) {
-    let error = result.expect_err("assignment must be rejected");
-    let message = format!("{error:#}");
-    assert!(
-        message.contains(expected),
-        "expected error containing {expected:?}, got {message:?}"
+#[test]
+fn overlapping_values_cannot_share_a_register() {
+    let regs = PhysRegSet::default_gp_with_scratch();
+    let result = verify_assignment(
+        &intervals((0, 3), (2, 5)),
+        &regs,
+        1,
+        &assignment(
+            Location::Reg(PhysReg::Rax),
+            Location::Reg(PhysReg::Rax),
+            0,
+            0,
+        ),
+    );
+
+    assert_eq!(
+        result,
+        Err(AssignmentError::RegisterConflict {
+            left: VReg(0),
+            right: VReg(1),
+            register: PhysReg::Rax,
+        })
     );
 }
 
 #[test]
-fn rejects_register_conflict() {
+fn overlapping_spills_cannot_alias_the_same_slot() {
     let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Reg(PhysReg::Rax)),
-            (VReg(1), Location::Reg(PhysReg::Rax)),
-        ]),
-        stack_slots: 0,
-        spills: 0,
-    };
-    assert_error_contains(
-        verify_assignment(&overlapping_intervals(), &regs, 1, &assignment),
-        "share register",
+    let result = verify_assignment(
+        &intervals((0, 3), (2, 5)),
+        &regs,
+        0,
+        &assignment(
+            Location::Stack(StackSlot { index: 0 }),
+            Location::Stack(StackSlot { index: 0 }),
+            1,
+            2,
+        ),
+    );
+
+    assert_eq!(
+        result,
+        Err(AssignmentError::StackSlotConflict {
+            left: VReg(0),
+            right: VReg(1),
+            slot: 0,
+        })
     );
 }
 
 #[test]
-fn rejects_overlapping_values_in_same_stack_slot() {
+fn a_dead_spill_slot_can_be_reused() {
     let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Stack(StackSlot { index: 0 })),
-            (VReg(1), Location::Stack(StackSlot { index: 0 })),
-        ]),
-        stack_slots: 1,
-        spills: 2,
-    };
-    assert_error_contains(
-        verify_assignment(&overlapping_intervals(), &regs, 0, &assignment),
-        "share stack slot 0",
+    let result = verify_assignment(
+        &intervals((0, 1), (2, 5)),
+        &regs,
+        0,
+        &assignment(
+            Location::Stack(StackSlot { index: 0 }),
+            Location::Stack(StackSlot { index: 0 }),
+            1,
+            2,
+        ),
+    );
+
+    assert_eq!(result, Ok(()));
+}
+
+#[test]
+fn scratch_registers_are_not_part_of_the_allocator_budget() {
+    let regs = PhysRegSet::default_gp_with_scratch();
+    let result = verify_assignment(
+        &intervals((0, 3), (2, 5)),
+        &regs,
+        5,
+        &assignment(
+            Location::Reg(PhysReg::R10),
+            Location::Stack(StackSlot { index: 0 }),
+            1,
+            1,
+        ),
+    );
+
+    assert_eq!(
+        result,
+        Err(AssignmentError::ReservedScratch {
+            value: VReg(0),
+            register: PhysReg::R10,
+        })
     );
 }
 
 #[test]
-fn permits_stack_slot_reuse_for_disjoint_intervals() {
+fn spill_metadata_matches_the_assignment_map() {
     let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Stack(StackSlot { index: 0 })),
-            (VReg(1), Location::Stack(StackSlot { index: 0 })),
-        ]),
-        stack_slots: 1,
-        spills: 2,
-    };
-    verify_assignment(&non_overlapping_intervals(), &regs, 0, &assignment).unwrap();
-}
+    let result = verify_assignment(
+        &intervals((0, 3), (2, 5)),
+        &regs,
+        1,
+        &assignment(
+            Location::Reg(PhysReg::Rax),
+            Location::Stack(StackSlot { index: 0 }),
+            1,
+            0,
+        ),
+    );
 
-#[test]
-fn rejects_reserved_scratch_register() {
-    let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Reg(PhysReg::R10)),
-            (VReg(1), Location::Stack(StackSlot { index: 0 })),
-        ]),
-        stack_slots: 1,
-        spills: 1,
-    };
-    assert_error_contains(
-        verify_assignment(&overlapping_intervals(), &regs, 5, &assignment),
-        "unavailable register R10",
+    assert_eq!(
+        result,
+        Err(AssignmentError::SpillCountMismatch {
+            declared: 0,
+            actual: 1,
+        })
     );
 }
 
 #[test]
-fn rejects_incorrect_spill_metadata() {
+fn stack_slot_metadata_covers_the_highest_slot() {
     let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Reg(PhysReg::Rax)),
-            (VReg(1), Location::Stack(StackSlot { index: 0 })),
-        ]),
-        stack_slots: 1,
-        spills: 0,
-    };
-    assert_error_contains(
-        verify_assignment(&overlapping_intervals(), &regs, 1, &assignment),
-        "spill count does not match",
+    let result = verify_assignment(
+        &intervals((0, 3), (2, 5)),
+        &regs,
+        1,
+        &assignment(
+            Location::Reg(PhysReg::Rax),
+            Location::Stack(StackSlot { index: 2 }),
+            2,
+            1,
+        ),
+    );
+
+    assert_eq!(
+        result,
+        Err(AssignmentError::StackSlotCountMismatch {
+            declared: 2,
+            expected: 3,
+        })
     );
 }
 
 #[test]
-fn rejects_incorrect_stack_slot_metadata() {
+fn register_and_stack_locations_may_overlap() {
     let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Reg(PhysReg::Rax)),
-            (VReg(1), Location::Stack(StackSlot { index: 2 })),
-        ]),
-        stack_slots: 2,
-        spills: 1,
-    };
-    assert_error_contains(
-        verify_assignment(&overlapping_intervals(), &regs, 1, &assignment),
-        "does not match highest used slot 3",
+    let result = verify_assignment(
+        &intervals((0, 3), (2, 5)),
+        &regs,
+        1,
+        &assignment(
+            Location::Reg(PhysReg::Rax),
+            Location::Stack(StackSlot { index: 0 }),
+            1,
+            1,
+        ),
     );
-}
 
-#[test]
-fn accepts_complete_conflict_free_assignment() {
-    let regs = PhysRegSet::default_gp_with_scratch();
-    let assignment = Assignment {
-        map: IndexMap::from([
-            (VReg(0), Location::Reg(PhysReg::Rax)),
-            (VReg(1), Location::Stack(StackSlot { index: 0 })),
-        ]),
-        stack_slots: 1,
-        spills: 1,
-    };
-    verify_assignment(&overlapping_intervals(), &regs, 1, &assignment).unwrap();
+    assert_eq!(result, Ok(()));
 }

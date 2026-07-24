@@ -1,11 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use alloc::PhysRegSet;
 use analysis::{build_interference_graph, compute_live_intervals, validate_function};
@@ -13,8 +7,9 @@ use codegen::{disasm, emit_function_i64, simd};
 use ir::{examples, interp::Interpreter, Function};
 
 mod allocators;
+mod runner_client;
 
-const RUNNER_TIMEOUT: Duration = Duration::from_secs(5);
+use runner_client::{RunnerClient, RunnerSpec};
 
 #[derive(Parser)]
 #[command(name = "playground")]
@@ -55,13 +50,6 @@ enum SimdTarget {
     Sse,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-enum RunnerSpec {
-    I64Cases { code: Vec<u8>, args: Vec<Vec<i64>> },
-    Sum8F32 { code: Vec<u8>, iters: u32 },
-}
-
 fn example_by_name(name: &str) -> Result<Function> {
     match name {
         "basicblock" => examples::basicblock(),
@@ -72,128 +60,6 @@ fn example_by_name(name: &str) -> Result<Function> {
             "unknown example '{name}'; expected basicblock, trace, loop-sum, or phi-swap-loop"
         ),
     }
-}
-
-fn drain_pipe<R>(mut reader: R) -> thread::JoinHandle<std::io::Result<Vec<u8>>>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut output = Vec::new();
-        reader.read_to_end(&mut output)?;
-        Ok(output)
-    })
-}
-
-fn join_pipe(
-    handle: thread::JoinHandle<std::io::Result<Vec<u8>>>,
-    stream_name: &str,
-) -> Result<Vec<u8>> {
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("runner {stream_name} reader panicked"))?
-        .with_context(|| format!("read runner {stream_name}"))
-}
-
-fn run_runner(spec: &RunnerSpec) -> Result<String> {
-    let temp = tempfile::NamedTempFile::new().context("create runner spec")?;
-    std::fs::write(temp.path(), serde_json::to_vec(spec)?).context("write runner spec")?;
-
-    let runner = find_or_build_runner_exe().context("locate or build runner")?;
-    let mut child = Command::new(runner)
-        .arg("--spec")
-        .arg(temp.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn runner")?;
-    let stdout_reader = drain_pipe(child.stdout.take().context("capture runner stdout")?);
-    let stderr_reader = drain_pipe(child.stderr.take().context("capture runner stderr")?);
-
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() >= RUNNER_TIMEOUT {
-            child.kill().context("kill timed-out runner")?;
-            let _ = child.wait();
-            let stdout = join_pipe(stdout_reader, "stdout")?;
-            let stderr = join_pipe(stderr_reader, "stderr")?;
-            anyhow::bail!(
-                "runner timed out after {:?}:\n{}\n{}",
-                RUNNER_TIMEOUT,
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr)
-            );
-        }
-        thread::sleep(Duration::from_millis(5));
-    };
-
-    let stdout = join_pipe(stdout_reader, "stdout")?;
-    let stderr = join_pipe(stderr_reader, "stderr")?;
-    let stdout = String::from_utf8_lossy(&stdout).to_string();
-    let stderr = String::from_utf8_lossy(&stderr).to_string();
-    anyhow::ensure!(status.success(), "runner failed:\n{stdout}\n{stderr}");
-    Ok(stdout)
-}
-
-fn find_or_build_runner_exe() -> Result<PathBuf> {
-    if let Some(path) = find_runner_exe_next_to_cli()? {
-        return Ok(path);
-    }
-
-    build_runner()?;
-    if let Some(path) = find_runner_exe_next_to_cli()? {
-        return Ok(path);
-    }
-
-    let workspace = workspace_root();
-    let executable = runner_exe_name();
-    for profile in ["debug", "release"] {
-        let candidate = workspace.join("target").join(profile).join(executable);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    anyhow::bail!("runner executable not found after build")
-}
-
-fn find_runner_exe_next_to_cli() -> Result<Option<PathBuf>> {
-    let current = std::env::current_exe().context("current executable")?;
-    let directory = current.parent().context("current executable parent")?;
-    let candidate = directory.join(runner_exe_name());
-    Ok(candidate.exists().then_some(candidate))
-}
-
-fn runner_exe_name() -> &'static str {
-    if cfg!(windows) {
-        "runner.exe"
-    } else {
-        "runner"
-    }
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates directory")
-        .parent()
-        .expect("workspace root")
-        .to_path_buf()
-}
-
-fn build_runner() -> Result<()> {
-    let status = Command::new("cargo")
-        .args(["build", "-p", "runner"])
-        .current_dir(workspace_root())
-        .status()
-        .context("spawn cargo build -p runner")?;
-    anyhow::ensure!(
-        status.success(),
-        "cargo build -p runner failed with {status}"
-    );
-    Ok(())
 }
 
 fn lcg_next(state: &mut u64) -> i64 {
@@ -266,6 +132,7 @@ fn parse_duration_ns(stdout: &str) -> Result<u128> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let runner = RunnerClient::default();
     match cli.cmd {
         Cmd::Run {
             example,
@@ -317,7 +184,7 @@ fn main() -> Result<()> {
                     .iter()
                     .map(|args| interpreter.eval_i64(&function, args))
                     .collect::<Result<Vec<_>>>()?;
-                let output = run_runner(&RunnerSpec::I64Cases {
+                let output = runner.run(&RunnerSpec::I64Cases {
                     code: emitted.bytes.clone(),
                     args: cases,
                 })?;
@@ -351,7 +218,7 @@ fn main() -> Result<()> {
             };
 
             println!("SIMD target: {target:?} (iters={iters})");
-            let scalar_output = run_runner(&RunnerSpec::Sum8F32 {
+            let scalar_output = runner.run(&RunnerSpec::Sum8F32 {
                 code: scalar.clone(),
                 iters,
             })?;
@@ -359,7 +226,7 @@ fn main() -> Result<()> {
             println!("scalar: {scalar_ns} ns");
 
             if use_sse {
-                let sse_output = run_runner(&RunnerSpec::Sum8F32 {
+                let sse_output = runner.run(&RunnerSpec::Sum8F32 {
                     code: sse.clone(),
                     iters,
                 })?;
@@ -374,40 +241,4 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runner_drains_output_larger_than_a_pipe_buffer() -> Result<()> {
-        let function = ir::parser::parse(
-            r#"
-            func large_output args=0
-            block b0:
-              v0 = const 9223372036854775807
-              ret v0
-            "#,
-        )?;
-        validate_function(&function)?;
-        let register_set = PhysRegSet::default_gp_with_scratch();
-        let intervals = compute_live_intervals(&function)?;
-        let allocator = allocators::get_allocator("linear-scan")?;
-        let assignment = allocator.allocate(&intervals, &register_set, 1)?;
-        let emitted = emit_function_i64(&function, &assignment, &register_set)?;
-        let output = run_runner(&RunnerSpec::I64Cases {
-            code: emitted.bytes,
-            args: vec![Vec::new(); 4096],
-        })?;
-        assert!(
-            output.len() > 64 * 1024,
-            "test must exceed a typical pipe buffer, got {} bytes",
-            output.len()
-        );
-        let results = parse_results(&output)?;
-        assert_eq!(results.len(), 4096);
-        assert!(results.iter().all(|value| *value == i64::MAX));
-        Ok(())
-    }
 }

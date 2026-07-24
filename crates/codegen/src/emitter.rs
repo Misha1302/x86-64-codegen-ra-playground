@@ -5,6 +5,8 @@ use iced_x86::code_asm::*;
 use indexmap::IndexMap;
 use ir::{BlockId, Function, Inst, Terminator, VReg};
 
+const MAX_STACK_FRAME_BYTES: i32 = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct CodegenMetrics {
     pub code_size: usize,
@@ -277,8 +279,16 @@ pub fn emit_function_i64(
         let bytes = total_slots
             .checked_mul(8)
             .ok_or_else(|| anyhow::anyhow!("stack frame byte overflow"))?;
-        ((bytes + 15) / 16) * 16
+        bytes
+            .checked_add(15)
+            .and_then(|value| value.checked_div(16))
+            .and_then(|value| value.checked_mul(16))
+            .ok_or_else(|| anyhow::anyhow!("aligned stack frame size overflow"))?
     };
+    anyhow::ensure!(
+        aligned_bytes <= MAX_STACK_FRAME_BYTES,
+        "stack frame is too large: {aligned_bytes} bytes"
+    );
     if aligned_bytes > 0 {
         assembler.sub(rsp, aligned_bytes)?;
     }
