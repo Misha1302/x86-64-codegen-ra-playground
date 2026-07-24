@@ -18,9 +18,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d humanize-update.b64 > /tmp/humanize-update.tar.gz
+          cat humanize-update.part* | base64 -d > /tmp/humanize-update.tar.gz
           tar -xzf /tmp/humanize-update.tar.gz
-          rm -f humanize-update.b64
+          rm -f humanize-update.part*
           rm -f .github/workflows/apply-humanize-refactor.yml
           rm -f .github/workflows/export-humanize-source.yml
           cargo fmt --all
