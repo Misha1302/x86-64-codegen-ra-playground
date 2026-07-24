@@ -5,54 +5,16 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply staged review update
-        shell: bash
-        run: |
-          set +e
-          {
-            set -x
-            if [[ ! -f update.b64 ]]; then
-              exit 0
-            fi
-            base64 -d update.b64 > /tmp/update.tar.gz
-            tar -xzf /tmp/update.tar.gz
-            rm -f update.b64 TEMP.md
-            cargo fmt --all
-            git config user.name github-actions[bot]
-            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git add README.md \
-              crates/alloc/src/lib.rs \
-              crates/alloc/tests/assignment_validation.rs \
-              crates/analysis/tests/validation.rs \
-              crates/cli/src/main.rs \
-              crates/runner/src/main.rs
-            git add -u update.b64 TEMP.md
-            git commit -m 'test: strengthen behavioral contracts and README'
-            git push
-          } > apply.log 2>&1
-          status=$?
-          cat apply.log
-          exit "$status"
-      - name: Upload apply diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: apply-diagnostics
-          path: apply.log
-          if-no-files-found: error
-          retention-days: 1
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Clippy
