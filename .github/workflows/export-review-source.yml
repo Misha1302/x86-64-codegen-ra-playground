@@ -1,8 +1,8 @@
 name: Export review source
 
 on:
-  push:
-    branches: [test/readme-hardening]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
