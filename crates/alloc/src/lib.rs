@@ -192,21 +192,37 @@ pub fn verify_assignment(
             .map
             .get(&left.v)
             .with_context(|| format!("missing assignment for {:?}", left.v))?;
-        let Location::Reg(left_register) = left_location else {
-            continue;
-        };
 
         for right in intervals.intervals.iter().skip(left_index + 1) {
             if !left.overlaps(right) {
                 continue;
             }
-            if assignment.map.get(&right.v) == Some(&Location::Reg(*left_register)) {
-                anyhow::bail!(
-                    "overlapping values {:?} and {:?} share register {:?}",
-                    left.v,
-                    right.v,
-                    left_register
-                );
+            let right_location = assignment
+                .map
+                .get(&right.v)
+                .with_context(|| format!("missing assignment for {:?}", right.v))?;
+            match (left_location, right_location) {
+                (Location::Reg(left_register), Location::Reg(right_register))
+                    if left_register == right_register =>
+                {
+                    anyhow::bail!(
+                        "overlapping values {:?} and {:?} share register {:?}",
+                        left.v,
+                        right.v,
+                        left_register
+                    );
+                }
+                (Location::Stack(left_slot), Location::Stack(right_slot))
+                    if left_slot == right_slot =>
+                {
+                    anyhow::bail!(
+                        "overlapping values {:?} and {:?} share stack slot {}",
+                        left.v,
+                        right.v,
+                        left_slot.index
+                    );
+                }
+                _ => {}
             }
         }
     }

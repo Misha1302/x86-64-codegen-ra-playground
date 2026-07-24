@@ -3,6 +3,15 @@ use anyhow::Result;
 use ir::{parser, Block, BlockId, Function, Inst, Terminator, VReg};
 use smallvec::smallvec;
 
+fn assert_validation_error(function: &Function, expected: &str) {
+    let error = validate_function(function).expect_err("function must be rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(expected),
+        "expected error containing {expected:?}, got {message:?}"
+    );
+}
+
 #[test]
 fn all_built_in_examples_validate() -> Result<()> {
     for function in [
@@ -17,7 +26,7 @@ fn all_built_in_examples_validate() -> Result<()> {
 }
 
 #[test]
-fn rejects_duplicate_definitions() -> Result<()> {
+fn rejects_duplicate_definitions_with_specific_error() -> Result<()> {
     let function = parser::parse(
         r#"
         func duplicate args=0
@@ -27,7 +36,7 @@ fn rejects_duplicate_definitions() -> Result<()> {
           ret v0
         "#,
     )?;
-    assert!(validate_function(&function).is_err());
+    assert_validation_error(&function, "has multiple definitions");
     Ok(())
 }
 
@@ -74,7 +83,7 @@ fn rejects_missing_phi_predecessor() {
             },
         ],
     };
-    assert!(validate_function(&function).is_err());
+    assert_validation_error(&function, "exactly one input for every predecessor");
 }
 
 #[test]
@@ -94,6 +103,87 @@ fn rejects_use_not_dominated_by_definition() -> Result<()> {
           ret v1
         "#,
     )?;
-    assert!(validate_function(&function).is_err());
+    assert_validation_error(&function, "does not dominate use");
+    Ok(())
+}
+
+#[test]
+fn rejects_use_before_definition_in_same_block() -> Result<()> {
+    let function = parser::parse(
+        r#"
+        func use_before_def args=0
+        block b0:
+          v1 = mov v0
+          v0 = const 7
+          ret v1
+        "#,
+    )?;
+    assert_validation_error(&function, "used before its definition");
+    Ok(())
+}
+
+#[test]
+fn rejects_unreachable_blocks() -> Result<()> {
+    let function = parser::parse(
+        r#"
+        func unreachable args=0
+        block b0:
+          v0 = const 1
+          ret v0
+        block b1:
+          v1 = const 2
+          ret v1
+        "#,
+    )?;
+    assert_validation_error(&function, "contains unreachable blocks");
+    Ok(())
+}
+
+#[test]
+fn rejects_phi_after_non_phi_instruction() -> Result<()> {
+    let function = parser::parse(
+        r#"
+        func misplaced_phi args=0
+        block b0:
+          v0 = const 1
+          jmp b1
+        block b1:
+          v1 = const 2
+          v2 = phi b0 v0
+          ret v2
+        "#,
+    )?;
+    assert_validation_error(&function, "phi nodes must be contiguous at the start");
+    Ok(())
+}
+
+#[test]
+fn rejects_duplicate_phi_predecessors() -> Result<()> {
+    let function = parser::parse(
+        r#"
+        func duplicate_phi_pred args=0
+        block b0:
+          v0 = const 1
+          jmp b1
+        block b1:
+          v1 = phi b0 v0, b0 v0
+          ret v1
+        "#,
+    )?;
+    assert_validation_error(&function, "contains duplicate predecessor");
+    Ok(())
+}
+
+#[test]
+fn rejects_out_of_range_argument_index() -> Result<()> {
+    let function = parser::parse(
+        r#"
+        func bad_arg args=1
+        block b0:
+          v0 = arg 1
+          ret v0
+        "#,
+    )?;
+    assert_validation_error(&function, "argument index 1 is out of range");
     Ok(())
 }

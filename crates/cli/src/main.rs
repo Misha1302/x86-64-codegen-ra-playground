@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -73,6 +74,27 @@ fn example_by_name(name: &str) -> Result<Function> {
     }
 }
 
+fn drain_pipe<R>(mut reader: R) -> thread::JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_pipe(
+    handle: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("runner {stream_name} reader panicked"))?
+        .with_context(|| format!("read runner {stream_name}"))
+}
+
 fn run_runner(spec: &RunnerSpec) -> Result<String> {
     let temp = tempfile::NamedTempFile::new().context("create runner spec")?;
     std::fs::write(temp.path(), serde_json::to_vec(spec)?).context("write runner spec")?;
@@ -85,32 +107,34 @@ fn run_runner(spec: &RunnerSpec) -> Result<String> {
         .stderr(Stdio::piped())
         .spawn()
         .context("spawn runner")?;
+    let stdout_reader = drain_pipe(child.stdout.take().context("capture runner stdout")?);
+    let stderr_reader = drain_pipe(child.stderr.take().context("capture runner stderr")?);
 
     let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
         if started.elapsed() >= RUNNER_TIMEOUT {
             child.kill().context("kill timed-out runner")?;
-            let output = child.wait_with_output()?;
+            let _ = child.wait();
+            let stdout = join_pipe(stdout_reader, "stdout")?;
+            let stderr = join_pipe(stderr_reader, "stderr")?;
             anyhow::bail!(
                 "runner timed out after {:?}:\n{}\n{}",
                 RUNNER_TIMEOUT,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
             );
         }
         thread::sleep(Duration::from_millis(5));
-    }
+    };
 
-    let output = child.wait_with_output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    anyhow::ensure!(
-        output.status.success(),
-        "runner failed:\n{stdout}\n{stderr}"
-    );
+    let stdout = join_pipe(stdout_reader, "stdout")?;
+    let stderr = join_pipe(stderr_reader, "stderr")?;
+    let stdout = String::from_utf8_lossy(&stdout).to_string();
+    let stderr = String::from_utf8_lossy(&stderr).to_string();
+    anyhow::ensure!(status.success(), "runner failed:\n{stdout}\n{stderr}");
     Ok(stdout)
 }
 
@@ -350,4 +374,40 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_drains_output_larger_than_a_pipe_buffer() -> Result<()> {
+        let function = ir::parser::parse(
+            r#"
+            func large_output args=0
+            block b0:
+              v0 = const 9223372036854775807
+              ret v0
+            "#,
+        )?;
+        validate_function(&function)?;
+        let register_set = PhysRegSet::default_gp_with_scratch();
+        let intervals = compute_live_intervals(&function)?;
+        let allocator = allocators::get_allocator("linear-scan")?;
+        let assignment = allocator.allocate(&intervals, &register_set, 1)?;
+        let emitted = emit_function_i64(&function, &assignment, &register_set)?;
+        let output = run_runner(&RunnerSpec::I64Cases {
+            code: emitted.bytes,
+            args: vec![Vec::new(); 4096],
+        })?;
+        assert!(
+            output.len() > 64 * 1024,
+            "test must exceed a typical pipe buffer, got {} bytes",
+            output.len()
+        );
+        let results = parse_results(&output)?;
+        assert_eq!(results.len(), 4096);
+        assert!(results.iter().all(|value| *value == i64::MAX));
+        Ok(())
+    }
 }

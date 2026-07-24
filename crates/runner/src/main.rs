@@ -20,13 +20,13 @@ enum Spec {
     Sum8F32 { code: Vec<u8>, iters: u32 },
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 struct ExecutableMapping {
     ptr: *mut u8,
     size: usize,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl ExecutableMapping {
     fn new(code: &[u8]) -> Result<Self> {
         anyhow::ensure!(!code.is_empty(), "generated code is empty");
@@ -61,7 +61,7 @@ impl ExecutableMapping {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl Drop for ExecutableMapping {
     fn drop(&mut self) {
         unsafe {
@@ -70,7 +70,7 @@ impl Drop for ExecutableMapping {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_limits() -> Result<()> {
     unsafe {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -132,10 +132,10 @@ fn execute_i64(ptr: *mut u8, args: &[i64]) -> Result<i64> {
 }
 
 fn main() -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     bail!("runner supports Linux x86-64 only");
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         let args = Args::parse();
         let data = fs::read(&args.spec).context("read spec")?;
