@@ -92,7 +92,23 @@ The current model does not yet cover calls, memory IR, register classes, callee-
 
 These omissions are explicit boundaries, not hidden assumptions. Extending the backend should first identify which existing invariant changes and which verifier/test must move with it.
 
-## 7. Extension rule
+## 7. Evidence map
+
+The main architectural claims are intentionally traceable to concrete implementation boundaries:
+
+| Claim | Implementation | Primary check |
+| --- | --- | --- |
+| SSA/CFG and dominance invariants | `crates/analysis` | validation tests reject malformed IR before allocation/codegen |
+| Liveness and interference | `crates/analysis` | branch/loop/`phi` cases exercise edge-sensitive liveness |
+| Allocator-independent correctness | `crates/alloc` | `verify_assignment` checks every allocator result |
+| Replaceable allocation policy | `crates/alloc_linear_scan`, `crates/alloc_sim_anneal` | both implementations pass the same verifier and pipeline tests |
+| Spill and `phi` lowering | `crates/codegen` | codegen tests cover spills and parallel-copy cycles |
+| Semantic equivalence of generated code | `crates/cli` + reference interpreter in `crates/ir` | native-vs-interpreter differential execution |
+| Fault containment for emitter failures | `crates/runner` | timeout and large-output runner tests |
+
+This map is not a substitute for the tests; it is a fast path from a public claim to the code boundary responsible for it.
+
+## 8. Extension rule
 
 A new allocator should need to know only the allocation contract, not codegen internals:
 
